@@ -1,4 +1,7 @@
+# Build output
 bin/
+
+# Go binaries
 *.exe
 *.exe~
 *.dll
@@ -6,7 +9,16 @@ bin/
 *.dylib
 *.test
 *.out
+
+# Module vendor
 vendor/
+
+# Runtime-generated files (jangan dicommit)
+proxies.txt
+stats.csv
+.hunt_resume
+
+# Output files (wallet & address lists)
 sample_wallets.csv
 sample_addresses.txt
 funded*.txt

@@ -1,5 +1,17 @@
 # The format of this file is identical to `.dockerignore`.
 # It is used to reduce the size of deployed images to make the process of publishing faster.
 
-# No need to store the pnpm store twice.
+# Replit internal
 .local
+
+# Go build cache
+.cache/
+.config/go/telemetry/
+
+# Runtime-generated files (tidak perlu di-deploy)
+proxies.txt
+stats.csv
+.hunt_resume
+wallets*.txt
+wallets*.csv
+addresses*.txt

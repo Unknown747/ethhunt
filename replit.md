@@ -1,33 +1,49 @@
 # ETH Wallet Tool
 
-Proyek CLI berbasis **Go** untuk generate, check balance, dan hunting wallet Ethereum secara massal dan cepat.
+Proyek CLI berbasis **Go 1.25.5** untuk generate, cek balance, dan hunting wallet Ethereum secara massal dan cepat. Mendukung multi-chain, batch RPC, proxy otomatis, notifikasi Telegram, BIP39 mnemonic, dan token ERC-20.
 
 ## Struktur Proyek
 
 ```
-eth-wallet-tool/
-├── bin/
-│   ├── eth-generator     # Binary: generator dompet massal
-│   ├── eth-checker       # Binary: cek balance satu / banyak alamat
-│   └── eth-hunt          # Binary: generate + check otomatis (hunting)
-├── cmd/
-│   ├── generator/main.go
-│   ├── checker/main.go
-│   └── hunt/main.go
-├── internal/
-│   ├── proxy/proxy.go    # Proxy manager (fetch, validasi, round-robin)
-│   └── wallet/wallet.go  # Ethereum wallet generator
-├── go.mod
-├── go.sum
-├── Makefile
-└── README.md
+/                           ← Root (akses cepat)
+├── eth-generator           # Shell wrapper → eth-wallet-tool/bin/eth-generator
+├── eth-checker             # Shell wrapper → eth-wallet-tool/bin/eth-checker
+├── eth-hunt                # Shell wrapper → eth-wallet-tool/bin/eth-hunt
+├── config.yaml             # Symlink → eth-wallet-tool/config.yaml
+├── found.txt               # Symlink → eth-wallet-tool/found.txt
+└── eth-wallet-tool/
+    ├── bin/
+    │   ├── eth-generator   # Binary: generator wallet massal
+    │   ├── eth-checker     # Binary: cek balance satu/banyak address
+    │   └── eth-hunt        # Binary: generate + check otomatis (hunting)
+    ├── cmd/
+    │   ├── generator/main.go
+    │   ├── checker/main.go
+    │   └── hunt/main.go
+    ├── internal/
+    │   ├── config/config.go     # YAML config loader
+    │   ├── rpc/manager.go       # Batch RPC + dead endpoint detection
+    │   ├── notify/telegram.go   # Notifikasi Telegram
+    │   ├── mnemonic/mnemonic.go # BIP39/BIP44 derivation
+    │   ├── proxy/proxy.go       # Proxy manager (fetch, validasi, round-robin)
+    │   └── wallet/wallet.go     # Random wallet generator (ECDSA)
+    ├── config.yaml         # ← Edit ini untuk konfigurasi
+    ├── go.mod              # Go 1.25.5 + toolchain go1.25.5
+    └── Makefile
 ```
 
-## File Akses Cepat (Root)
+## Cara Pakai (dari Root)
 
-File berikut tersedia langsung di folder root (symlink ke `eth-wallet-tool/`):
-- `config.yaml` → Edit konfigurasi chain, RPC, proxy, Telegram, dll.
-- `found.txt` → Hasil wallet yang ditemukan dengan saldo
+```bash
+# Generate 10 wallet
+./eth-generator
+
+# Cek balance satu address
+./eth-checker -addr 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
+
+# Mulai hunting (tekan Ctrl+C untuk berhenti)
+./eth-hunt
+```
 
 ## Build
 
@@ -42,51 +58,34 @@ go build -ldflags="-s -w" -o bin/eth-checker  ./cmd/checker/
 go build -ldflags="-s -w" -o bin/eth-hunt     ./cmd/hunt/
 ```
 
-## Penggunaan
-
-### eth-generator — Generate wallet massal
-
+Atau via Makefile (dari dalam `eth-wallet-tool/`):
 ```bash
-./bin/eth-generator -n 1000 -workers 8 -o wallets.txt
-./bin/eth-generator -n 500 -csv -o wallets.csv
+make build
 ```
 
-### eth-checker — Cek balance alamat
+## File Penting
 
-```bash
-./bin/eth-checker -addr 0xABC...
-./bin/eth-checker -file addresses.txt -workers 20 -o hasil.txt
-./bin/eth-checker -proxy -fetch-proxy -addr 0xABC...
-```
+| File | Keterangan |
+|------|------------|
+| `config.yaml` | Konfigurasi chain, RPC, proxy, Telegram, dll |
+| `found.txt` | Wallet dengan balance yang ditemukan |
+| `stats.csv` | Log statistik performa (auto-generated, tidak dicommit) |
+| `.hunt_resume` | State resume sesi hunt (auto-generated, tidak dicommit) |
+| `proxies.txt` | Proxy aktif (auto-generated, tidak dicommit) |
 
-### eth-hunt — Auto generate + check
+## Go Version
 
-```bash
-./bin/eth-hunt -workers 16
-./bin/eth-hunt -workers 32 -proxy -fetch-proxy -o found.txt
-./bin/eth-hunt -workers 8 -rpc "https://eth.llamarpc.com,https://ethereum.publicnode.com"
-```
-
-## Default RPC Endpoints
-
-1. https://eth.llamarpc.com
-2. https://ethereum.publicnode.com
-3. https://eth-mainnet.public.blastapi.io
-4. https://rpc.payload.de
-5. https://1rpc.io/eth
+Go 1.25.5 — modul di `eth-wallet-tool/go.mod` dengan direktif `toolchain go1.25.5`.
+Path binary: `/nix/store/60z37432vmgkg54krwr1z057bqwp7583-go-1.25.5/bin/go`
 
 ## Fitur Utama
 
 - Concurrent worker pool dengan round-robin RPC
-- Multi-RPC failover + retry otomatis
+- Batch RPC (20 address per call) untuk efisiensi tinggi
+- Multi-chain: Ethereum, BSC, Polygon, Arbitrum
+- Multi-RPC failover + dead endpoint detection
 - Auto-fetch proxy dari 7 sumber GitHub
-- Validasi proxy via Ethereum RPC test
-- Auto-remove proxy mati (setelah 3 gagal)
-- Auto-refetch ketika pool proxy habis
-- Background refresh proxy setiap 2 menit
-- Shutdown instan (context propagation)
-- Output colorized terminal
-
-## Go Version
-
-Go 1.25.5
+- BIP39 mnemonic (12/24 kata)
+- Token ERC-20: USDT, USDC
+- Notifikasi Telegram saat wallet funded ditemukan
+- Stats CSV log & resume sesi

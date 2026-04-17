@@ -1,17 +1,26 @@
-# See https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files for more about ignoring files.
+# Go binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
 
-# compiled output
-dist
-tmp
-out-tsc
-*.tsbuildinfo
-.expo
-.expo-shared
+# Go build output
+bin/
+vendor/
 
-# dependencies
-node_modules
+# Runtime-generated files
+proxies.txt
+stats.csv
+.hunt_resume
+wallets*.txt
+wallets*.csv
+addresses*.txt
+funded*.txt
 
-# IDEs and editors
+# IDE / Editor
 /.idea
 .project
 .classpath
@@ -19,31 +28,18 @@ node_modules
 *.launch
 .settings/
 *.sublime-workspace
-
-# IDE - VSCode
 .vscode/*
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
+.cursor/
 
-# misc
-/.sass-cache
-/connect.lock
-/coverage
-/libpeerconnection.log
-npm-debug.log
-yarn-error.log
-testem.log
-/typings
-
-# System Files
+# System
 .DS_Store
 Thumbs.db
 
-.cursor/rules/nx-rules.mdc
-.github/instructions/nx.instructions.md
-
-# Replit
+# Replit internal
 .cache/
 .local/
+.config/go/telemetry/

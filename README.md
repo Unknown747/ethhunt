@@ -308,10 +308,11 @@ timestamp,generated,checked,found,errors,gen_rate,check_rate,rpc_alive
 
 ## Build dari Source
 
-Butuh **Go 1.21+**
+Butuh **Go 1.25.5**
 
 ```bash
 cd eth-wallet-tool
+export GOTOOLCHAIN=local
 
 go build -ldflags="-s -w" -o bin/eth-generator ./cmd/generator/
 go build -ldflags="-s -w" -o bin/eth-checker  ./cmd/checker/
@@ -326,23 +327,29 @@ make build
 ## Struktur Proyek
 
 ```
-eth-wallet-tool/
-├── bin/
-│   ├── eth-generator
-│   ├── eth-checker
-│   └── eth-hunt
-├── cmd/
-│   ├── generator/main.go   # Generator v2 (random + BIP39, progress bar)
-│   ├── checker/main.go     # Checker v3 (batch RPC, multi-chain, progress)
-│   └── hunt/main.go        # Hunter v3 (semua fitur terintegrasi)
-├── internal/
-│   ├── config/config.go    # YAML config loader
-│   ├── rpc/manager.go      # Batch RPC + dead detection
-│   ├── notify/telegram.go  # Telegram bot notifications
-│   ├── mnemonic/mnemonic.go # BIP39/BIP44 wallet derivation
-│   ├── proxy/proxy.go      # Proxy manager
-│   └── wallet/wallet.go    # Random wallet generator
-├── config.yaml             # ← Edit ini untuk konfigurasi
-├── go.mod
-└── Makefile
+/                               ← Root (akses cepat)
+├── eth-generator               # Wrapper → eth-wallet-tool/bin/eth-generator
+├── eth-checker                 # Wrapper → eth-wallet-tool/bin/eth-checker
+├── eth-hunt                    # Wrapper → eth-wallet-tool/bin/eth-hunt
+├── config.yaml                 # Symlink → eth-wallet-tool/config.yaml
+├── found.txt                   # Symlink → eth-wallet-tool/found.txt
+└── eth-wallet-tool/
+    ├── bin/
+    │   ├── eth-generator
+    │   ├── eth-checker
+    │   └── eth-hunt
+    ├── cmd/
+    │   ├── generator/main.go   # Generator v2 (random + BIP39, progress bar)
+    │   ├── checker/main.go     # Checker v3 (batch RPC, multi-chain, progress)
+    │   └── hunt/main.go        # Hunter v3 (semua fitur terintegrasi)
+    ├── internal/
+    │   ├── config/config.go    # YAML config loader
+    │   ├── rpc/manager.go      # Batch RPC + dead detection
+    │   ├── notify/telegram.go  # Telegram bot notifications
+    │   ├── mnemonic/mnemonic.go # BIP39/BIP44 wallet derivation
+    │   ├── proxy/proxy.go      # Proxy manager
+    │   └── wallet/wallet.go    # Random wallet generator
+    ├── config.yaml             # ← Edit ini untuk konfigurasi
+    ├── go.mod                  # Go 1.25.5
+    └── Makefile
 ```
