@@ -75,8 +75,8 @@ make build
 
 ## Go Version
 
-Go 1.25.5 — modul di `eth-wallet-tool/go.mod` dengan direktif `toolchain go1.25.5`.
-Path binary: `/nix/store/60z37432vmgkg54krwr1z057bqwp7583-go-1.25.5/bin/go`
+Go 1.25.5 — satu-satunya versi yang terpasang (go-1.21 sudah dihapus).
+Gunakan `GOTOOLCHAIN=local` saat build untuk mencegah download toolchain.
 
 ## Fitur Utama
 
