@@ -29,7 +29,7 @@ outputType = "console"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd eth-wallet-tool && export PATH=/nix/store/60z37432vmgkg54krwr1z057bqwp7583-go-1.25.5/bin:$PATH && go build -ldflags='-s -w' -o bin/eth-generator ./cmd/generator/ && go build -ldflags='-s -w' -o bin/eth-checker ./cmd/checker/ && go build -ldflags='-s -w' -o bin/eth-hunt ./cmd/hunt/ && echo '=== ETH Generator ===' && ./bin/eth-generator -n 3 && echo '' && echo '=== ETH Checker (Vitalik) ===' && ./bin/eth-checker -addr 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 2>&1 | tail -5"
+args = "cd eth-wallet-tool && export GOPATH=$HOME/go && export GOTOOLCHAIN=local && export PATH=/nix/store/60z37432vmgkg54krwr1z057bqwp7583-go-1.25.5/bin:$PATH && go build -ldflags='-s -w' -o bin/eth-generator ./cmd/generator/ && go build -ldflags='-s -w' -o bin/eth-checker ./cmd/checker/ && go build -ldflags='-s -w' -o bin/eth-hunt ./cmd/hunt/ && echo '=== ETH Generator ===' && ./bin/eth-generator -n 3 && echo '' && echo '=== ETH Checker (Vitalik) ===' && ./bin/eth-checker -addr 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 2>&1 | tail -5"
 
 [agent]
 stack = "PNPM_WORKSPACE"

@@ -23,18 +23,23 @@ eth-wallet-tool/
 └── README.md
 ```
 
+## File Akses Cepat (Root)
+
+File berikut tersedia langsung di folder root (symlink ke `eth-wallet-tool/`):
+- `config.yaml` → Edit konfigurasi chain, RPC, proxy, Telegram, dll.
+- `found.txt` → Hasil wallet yang ditemukan dengan saldo
+
 ## Build
+
+Gunakan Go 1.25.5 dengan `GOTOOLCHAIN=local` untuk menghindari error "toolchain not available":
 
 ```bash
 cd eth-wallet-tool
+export GOTOOLCHAIN=local
+export PATH=/nix/store/60z37432vmgkg54krwr1z057bqwp7583-go-1.25.5/bin:$PATH
 go build -ldflags="-s -w" -o bin/eth-generator ./cmd/generator/
 go build -ldflags="-s -w" -o bin/eth-checker  ./cmd/checker/
 go build -ldflags="-s -w" -o bin/eth-hunt     ./cmd/hunt/
-```
-
-Atau pakai Makefile:
-```bash
-cd eth-wallet-tool && make build
 ```
 
 ## Penggunaan
