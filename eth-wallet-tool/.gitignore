@@ -1,0 +1,15 @@
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+sample_wallets.csv
+sample_addresses.txt
+funded*.txt
+wallets*.txt
+wallets*.csv
+addresses*.txt
