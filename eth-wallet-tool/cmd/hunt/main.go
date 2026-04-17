@@ -212,15 +212,16 @@ type batchJob struct {
 }
 
 type workerPool struct {
-        jobs    chan batchJob
-        results chan foundEntry
-        rpcMgr  *rpc.Manager
-        pm      *proxy.Manager
-        useProxy bool
-        tokens  []rpc.TokenCheck
-        ctx     context.Context
-        wg      sync.WaitGroup
-        stats   *Stats
+        jobs        chan batchJob
+        results     chan foundEntry
+        rpcMgr      *rpc.Manager
+        pm          *proxy.Manager
+        useProxy    bool
+        tokens      []rpc.TokenCheck
+        ctx         context.Context
+        wg          sync.WaitGroup
+        stats       *Stats
+        clientCache sync.Map // proxyAddr → *http.Client (reuse koneksi, hindari buat Transport baru tiap batch)
 }
 
 type foundEntry struct {
@@ -264,9 +265,9 @@ func (wp *workerPool) worker() {
                         addresses[i] = w.address
                 }
 
-                // Fix: sebelumnya pm.Next() dipanggil tapi tidak dipakai untuk RPC.
-                // Sekarang setiap worker ambil proxy berbeda (round-robin) dan buat
-                // HTTP client yang benar-benar routing lewat proxy tersebut.
+                // Ambil proxy berikutnya (round-robin) dan dapatkan HTTP client dari cache.
+                // Cache (sync.Map) memastikan proxy yang sama reuse Transport-nya
+                // sehingga koneksi TCP bisa dipakai ulang antar batch → lebih cepat.
                 var proxyAddr string
                 if wp.useProxy && wp.pm != nil {
                         if p := wp.pm.Next(); p != nil {
@@ -275,7 +276,12 @@ func (wp *workerPool) worker() {
                 }
                 var proxyClient *http.Client
                 if proxyAddr != "" {
-                        proxyClient = proxy.BuildHTTPClient(proxyAddr, 15*time.Second)
+                        if cached, ok := wp.clientCache.Load(proxyAddr); ok {
+                                proxyClient = cached.(*http.Client)
+                        } else {
+                                proxyClient = proxy.BuildHTTPClient(proxyAddr, 15*time.Second)
+                                wp.clientCache.Store(proxyAddr, proxyClient)
+                        }
                 }
 
                 batchRes, err := wp.rpcMgr.GetBalanceBatchWithClient(wp.ctx, proxyClient, addresses, wp.tokens)
@@ -465,7 +471,8 @@ func main() {
         }
         rpcMgr := rpc.NewManager(endpoints, httpClient,
                 cfg.RPC.Timeout, cfg.RPC.Retries,
-                cfg.RPC.DeadThreshold, cfg.RPC.DeadCooldown)
+                cfg.RPC.DeadThreshold, cfg.RPC.DeadCooldown,
+                cfg.RPC.RateLimit)
 
         // ── Resume State ──
         resume := loadResume(cfg.Output.ResumeFile)
@@ -557,13 +564,23 @@ func main() {
                 }
         }()
 
+        // ── Token decimals lookup (fix: sebelumnya hardcode decimals=6 untuk semua token) ──
+        tokenDecimals := make(map[string]int, len(tokenChecks))
+        for _, tc := range tokenChecks {
+                tokenDecimals[tc.Name] = tc.Decimals
+        }
+
         // ── Result printer ──
         go func() {
                 for entry := range pool.results {
                         ethF, _ := rpc.WeiToDecimal(entry.ethWei, 18).Float64()
                         tokenFloats := map[string]float64{}
                         for k, v := range entry.tokenBals {
-                                f, _ := rpc.WeiToDecimal(v, 6).Float64()
+                                dec := tokenDecimals[k] // gunakan decimals yang benar per token
+                                if dec == 0 {
+                                        dec = 18 // fallback jika tidak ditemukan
+                                }
+                                f, _ := rpc.WeiToDecimal(v, dec).Float64()
                                 tokenFloats[k] = f
                         }
 

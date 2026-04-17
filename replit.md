@@ -84,8 +84,33 @@ Gunakan `GOTOOLCHAIN=local` saat build untuk mencegah download toolchain.
 - Batch RPC (20 address per call) untuk efisiensi tinggi
 - Multi-chain: Ethereum, BSC, Polygon, Arbitrum
 - Multi-RPC failover + dead endpoint detection
-- Auto-fetch proxy dari 7 sumber GitHub
+- Proxy: rotating per-batch (hunt & checker), client cache reuse koneksi TCP
+- Auto-fetch proxy dari 7 sumber GitHub, validasi dengan 4 endpoint fallback
+- Rate limiter per RPC endpoint (token bucket, konfig `rate_limit` di config.yaml)
 - BIP39 mnemonic (12/24 kata)
-- Token ERC-20: USDT, USDC
+- Token ERC-20: USDT, USDC (decimals benar per token)
 - Notifikasi Telegram saat wallet funded ditemukan
 - Stats CSV log & resume sesi
+
+## Cara Aktifkan Proxy
+
+```bash
+# Mode 1: via flag saat jalankan
+./eth-hunt -proxy
+./eth-checker -addr <addr> -proxy
+
+# Mode 2: fetch proxy baru terlebih dulu
+./eth-hunt -fetch-proxy -proxy
+
+# Mode 3: aktifkan permanen di config.yaml
+# proxy:
+#   enabled: true
+```
+
+## Konfigurasi Rate Limit (Anti-ban RPC)
+
+Edit `config.yaml`:
+```yaml
+rpc:
+  rate_limit: 10  # maks 10 request/detik per endpoint (0 = unlimited)
+```

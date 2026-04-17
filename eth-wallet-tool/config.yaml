@@ -19,6 +19,7 @@ rpc:
   retries: 3
   dead_threshold: 5   # Berapa gagal sebelum RPC diistirahatkan
   dead_cooldown: 5m   # Lama istirahat RPC
+  rate_limit: 0       # Maks request/detik per RPC endpoint (0 = unlimited, tanpa throttling)
 
 # ── Proxy ────────────────────────────────────────────
 proxy:
