@@ -1,0 +1,2 @@
+#!/bin/bash
+exec "$(dirname "$0")/eth-wallet-tool/bin/eth-hunt" "$@"
