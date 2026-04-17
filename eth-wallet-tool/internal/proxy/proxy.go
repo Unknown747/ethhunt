@@ -25,6 +25,15 @@ var ProxySources = []string{
 	"https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
 }
 
+// testEndpoints adalah daftar RPC fallback untuk validasi proxy.
+// Fix: sebelumnya hanya satu URL hardcode — jika down, semua validasi gagal.
+var testEndpoints = []string{
+	"https://eth.llamarpc.com",
+	"https://ethereum.publicnode.com",
+	"https://eth-mainnet.public.blastapi.io",
+	"https://rpc.payload.de",
+}
+
 // Proxy merepresentasikan satu proxy HTTP
 type Proxy struct {
 	Address string // host:port
@@ -191,8 +200,8 @@ func (m *Manager) FetchRaw(ctx context.Context, sourceURL string) ([]string, err
 	return result, nil
 }
 
-// TestProxy menguji apakah proxy bisa terhubung ke Ethereum RPC
-func TestProxy(proxyAddr string, timeout time.Duration) bool {
+// testProxyWithEndpoint menguji satu proxy terhadap satu RPC endpoint
+func testProxyWithEndpoint(proxyAddr, endpoint string, timeout time.Duration) bool {
 	proxyURL, err := url.Parse("http://" + proxyAddr)
 	if err != nil {
 		return false
@@ -208,12 +217,23 @@ func TestProxy(proxyAddr string, timeout time.Duration) bool {
 	}
 
 	body := `{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`
-	resp, err := client.Post("https://eth.llamarpc.com", "application/json", strings.NewReader(body))
+	resp, err := client.Post(endpoint, "application/json", strings.NewReader(body))
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == 200
+}
+
+// TestProxy menguji apakah proxy bisa terhubung ke Ethereum RPC.
+// Fix: coba beberapa endpoint fallback agar tidak bergantung satu URL.
+func TestProxy(proxyAddr string, timeout time.Duration) bool {
+	for _, endpoint := range testEndpoints {
+		if testProxyWithEndpoint(proxyAddr, endpoint, timeout) {
+			return true
+		}
+	}
+	return false
 }
 
 // FetchAndValidate mengambil proxy dari semua sumber, memvalidasi, dan menyimpan yang valid.
@@ -291,11 +311,15 @@ func (m *Manager) FetchAndValidate(ctx context.Context, workers int) {
 		}()
 	}
 
+	// Fix: gunakan label untuk break keluar dari for loop saat ctx cancelled.
+	// Sebelumnya: break di dalam select hanya keluar dari select, bukan for loop
+	// → goroutine bocor karena terus mencoba kirim ke jobs yang tidak ada worker-nya.
 	go func() {
+	loop:
 		for _, c := range candidates {
 			select {
 			case <-ctx.Done():
-				break
+				break loop
 			case jobs <- c:
 			}
 		}
