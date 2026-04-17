@@ -5,6 +5,9 @@ go 1.25.5
 require (
 	github.com/ethereum/go-ethereum v1.17.2
 	github.com/fatih/color v1.19.0
+	github.com/tyler-smith/go-bip32 v1.0.0
+	github.com/tyler-smith/go-bip39 v1.1.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -15,9 +18,6 @@ require (
 	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/tyler-smith/go-bip32 v1.0.0 // indirect
-	github.com/tyler-smith/go-bip39 v1.1.0 // indirect
 	golang.org/x/crypto v0.44.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
