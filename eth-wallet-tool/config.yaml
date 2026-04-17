@@ -23,7 +23,7 @@ rpc:
 
 # ── Proxy ────────────────────────────────────────────
 proxy:
-  enabled: false
+  enabled: true
   file: proxies.txt
   max_fails: 3
   auto_fetch: false
