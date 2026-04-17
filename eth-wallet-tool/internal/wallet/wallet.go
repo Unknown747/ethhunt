@@ -22,11 +22,11 @@ func Generate() (*Wallet, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %w", err)
 	}
-	return FromPrivateKey(privateKey), nil
+	return fromPrivateKey(privateKey), nil
 }
 
-// FromPrivateKey derives wallet data from an ECDSA private key
-func FromPrivateKey(privateKey *ecdsa.PrivateKey) *Wallet {
+// fromPrivateKey derives wallet data from an ECDSA private key
+func fromPrivateKey(privateKey *ecdsa.PrivateKey) *Wallet {
 	privateKeyBytes := crypto.FromECDSA(privateKey)
 	publicKey := privateKey.Public().(*ecdsa.PublicKey)
 	publicKeyBytes := crypto.FromECDSAPub(publicKey)
@@ -39,27 +39,7 @@ func FromPrivateKey(privateKey *ecdsa.PrivateKey) *Wallet {
 	}
 }
 
-// FromPrivateKeyHex derives wallet from hex private key string
-func FromPrivateKeyHex(privKeyHex string) (*Wallet, error) {
-	privBytes, err := hex.DecodeString(stripHexPrefix(privKeyHex))
-	if err != nil {
-		return nil, fmt.Errorf("invalid hex: %w", err)
-	}
-	privateKey, err := crypto.ToECDSA(privBytes)
-	if err != nil {
-		return nil, fmt.Errorf("invalid private key: %w", err)
-	}
-	return FromPrivateKey(privateKey), nil
-}
-
 // IsValidAddress checks if a string is a valid Ethereum address
 func IsValidAddress(address string) bool {
 	return common.IsHexAddress(address)
-}
-
-func stripHexPrefix(s string) string {
-	if len(s) > 2 && s[:2] == "0x" {
-		return s[2:]
-	}
-	return s
 }

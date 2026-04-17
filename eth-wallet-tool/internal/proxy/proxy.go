@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,7 +14,7 @@ import (
 	"time"
 )
 
-// ProxySource adalah URL sumber daftar proxy gratis
+// ProxySources adalah URL sumber daftar proxy gratis
 var ProxySources = []string{
 	"https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
 	"https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
@@ -32,13 +31,6 @@ type Proxy struct {
 	Fails   int
 }
 
-func (p *Proxy) URL() string {
-	if strings.HasPrefix(p.Address, "http") {
-		return p.Address
-	}
-	return "http://" + p.Address
-}
-
 // Manager mengelola pool proxy dengan auto-fetch dan health check
 type Manager struct {
 	mu          sync.RWMutex
@@ -48,7 +40,7 @@ type Manager struct {
 	fetching    atomic.Bool
 	maxFails    int
 	fetchClient *http.Client
-	OnRefetch   func(count int) // callback saat refetch
+	OnRefetch   func(count int)  // callback saat refetch berhasil
 	OnRemove    func(addr string) // callback saat proxy dibuang
 }
 
@@ -112,21 +104,9 @@ func (m *Manager) Next() *Proxy {
 	return m.proxies[idx%int64(len(m.proxies))]
 }
 
-// Random mengambil proxy secara acak
-func (m *Manager) Random() *Proxy {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if len(m.proxies) == 0 {
-		return nil
-	}
-	return m.proxies[rand.Intn(len(m.proxies))]
-}
-
 // MarkFailed menandai proxy gagal, hapus jika melebihi batas
 func (m *Manager) MarkFailed(addr string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	for i, p := range m.proxies {
 		if p.Address == addr {
 			p.Fails++
@@ -139,9 +119,11 @@ func (m *Manager) MarkFailed(addr string) {
 			break
 		}
 	}
+	empty := len(m.proxies) == 0
+	m.mu.Unlock()
 
-	// Auto-refetch jika tinggal sedikit atau habis
-	if len(m.proxies) == 0 {
+	// Auto-refetch jika pool habis
+	if empty {
 		go m.FetchAndValidate(context.Background(), 0)
 	}
 }
@@ -198,10 +180,10 @@ func (m *Manager) FetchRaw(ctx context.Context, sourceURL string) ([]string, err
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// Normalisasi format
-		line = strings.TrimPrefix(line, "http://")
+		// Normalisasi: buang prefix http(s)://
 		line = strings.TrimPrefix(line, "https://")
-		// Filter: hanya ambil yang formatnya host:port
+		line = strings.TrimPrefix(line, "http://")
+		// Hanya ambil yang formatnya host:port tanpa path
 		if strings.Contains(line, ":") && !strings.Contains(line, "/") {
 			result = append(result, line)
 		}
@@ -209,7 +191,7 @@ func (m *Manager) FetchRaw(ctx context.Context, sourceURL string) ([]string, err
 	return result, nil
 }
 
-// TestProxy menguji apakah proxy berfungsi dengan timeout tertentu
+// TestProxy menguji apakah proxy bisa terhubung ke Ethereum RPC
 func TestProxy(proxyAddr string, timeout time.Duration) bool {
 	proxyURL, err := url.Parse("http://" + proxyAddr)
 	if err != nil {
@@ -225,7 +207,6 @@ func TestProxy(proxyAddr string, timeout time.Duration) bool {
 		},
 	}
 
-	// Test dengan call ke Ethereum RPC
 	body := `{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`
 	resp, err := client.Post("https://eth.llamarpc.com", "application/json", strings.NewReader(body))
 	if err != nil {
@@ -235,11 +216,11 @@ func TestProxy(proxyAddr string, timeout time.Duration) bool {
 	return resp.StatusCode == 200
 }
 
-// FetchAndValidate mengambil, validasi, dan simpan proxy baru
-// workers: jumlah goroutine validator (0 = default 50)
+// FetchAndValidate mengambil proxy dari semua sumber, memvalidasi, dan menyimpan yang valid.
+// workers: jumlah goroutine validasi (0 = default 50)
 func (m *Manager) FetchAndValidate(ctx context.Context, workers int) {
 	if !m.fetching.CompareAndSwap(false, true) {
-		return // Sudah ada proses fetch
+		return // sudah ada proses fetch berjalan
 	}
 	defer m.fetching.Store(false)
 
@@ -247,29 +228,29 @@ func (m *Manager) FetchAndValidate(ctx context.Context, workers int) {
 		workers = 50
 	}
 
-	// Kumpulkan semua proxy dari semua sumber
+	// Kumpulkan proxy dari semua sumber secara concurrent
 	rawSet := make(map[string]bool)
-	var mu sync.Mutex
-	var wg sync.WaitGroup
+	var rawMu sync.Mutex
+	var fetchWg sync.WaitGroup
 
 	for _, src := range ProxySources {
-		wg.Add(1)
+		fetchWg.Add(1)
 		go func(source string) {
-			defer wg.Done()
+			defer fetchWg.Done()
 			proxies, err := m.FetchRaw(ctx, source)
 			if err != nil {
 				return
 			}
-			mu.Lock()
+			rawMu.Lock()
 			for _, p := range proxies {
 				rawSet[p] = true
 			}
-			mu.Unlock()
+			rawMu.Unlock()
 		}(src)
 	}
-	wg.Wait()
+	fetchWg.Wait()
 
-	// Deduplicate + filter yang sudah ada
+	// Filter proxy yang sudah ada di pool
 	m.mu.RLock()
 	existing := make(map[string]bool, len(m.proxies))
 	for _, p := range m.proxies {
@@ -277,7 +258,7 @@ func (m *Manager) FetchAndValidate(ctx context.Context, workers int) {
 	}
 	m.mu.RUnlock()
 
-	var candidates []string
+	candidates := make([]string, 0, len(rawSet))
 	for addr := range rawSet {
 		if !existing[addr] {
 			candidates = append(candidates, addr)
@@ -288,14 +269,15 @@ func (m *Manager) FetchAndValidate(ctx context.Context, workers int) {
 		return
 	}
 
-	// Validasi concurrent
-	jobs := make(chan string, len(candidates))
+	// Validasi concurrent dengan worker pool
+	jobs := make(chan string, workers)
 	valid := make(chan string, len(candidates))
 
+	var validateWg sync.WaitGroup
 	for i := 0; i < workers; i++ {
-		wg.Add(1)
+		validateWg.Add(1)
 		go func() {
-			defer wg.Done()
+			defer validateWg.Done()
 			for addr := range jobs {
 				select {
 				case <-ctx.Done():
@@ -309,15 +291,20 @@ func (m *Manager) FetchAndValidate(ctx context.Context, workers int) {
 		}()
 	}
 
-	for _, c := range candidates {
-		jobs <- c
-	}
-	close(jobs)
+	go func() {
+		for _, c := range candidates {
+			select {
+			case <-ctx.Done():
+				break
+			case jobs <- c:
+			}
+		}
+		close(jobs)
+		validateWg.Wait()
+		close(valid)
+	}()
 
-	wg.Wait()
-	close(valid)
-
-	// Tambahkan proxy valid ke pool
+	// Kumpulkan proxy valid
 	var newProxies []*Proxy
 	for addr := range valid {
 		newProxies = append(newProxies, &Proxy{Address: addr})
@@ -352,7 +339,7 @@ func (m *Manager) AutoRefresh(ctx context.Context, minThreshold int, checkInterv
 	}
 }
 
-// BuildHTTPClient membuat http.Client yang menggunakan proxy
+// BuildHTTPClient membuat http.Client dengan atau tanpa proxy
 func BuildHTTPClient(proxyAddr string, timeout time.Duration) *http.Client {
 	if proxyAddr == "" {
 		return &http.Client{

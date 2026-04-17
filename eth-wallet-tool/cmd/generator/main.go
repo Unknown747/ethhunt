@@ -7,7 +7,6 @@ import (
 	"os"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/fatih/color"
@@ -24,6 +23,8 @@ var (
 	dimWhite    = color.New(color.FgWhite, color.Faint)
 )
 
+const chanBufCap = 4096 // batas buffer channel agar tidak habiskan RAM
+
 func printBanner() {
 	boldCyan.Println(`
 ╔═══════════════════════════════════════════════════╗
@@ -33,29 +34,30 @@ func printBanner() {
 }
 
 func main() {
-	count := flag.Int("n", 10, "number of wallets to generate")
-	workers := flag.Int("workers", runtime.NumCPU(), "number of concurrent workers")
+	count := flag.Int("n", 10, "jumlah wallet yang digenerate")
+	workers := flag.Int("workers", runtime.NumCPU(), "jumlah worker concurrent")
 	output := flag.String("o", "", "output file (default: stdout)")
-	showPriv := flag.Bool("priv", true, "show private key")
-	showPub := flag.Bool("pub", false, "show public key")
-	csvMode := flag.Bool("csv", false, "output as CSV format")
+	showPriv := flag.Bool("priv", true, "tampilkan private key")
+	showPub := flag.Bool("pub", false, "tampilkan public key")
+	csvMode := flag.Bool("csv", false, "output format CSV")
 	flag.Parse()
 
 	printBanner()
 
-	boldYellow.Printf("\n[CONFIG] Generating %d wallets with %d workers\n\n", *count, *workers)
+	boldYellow.Printf("\n[CONFIG] Generating %d wallets dengan %d workers\n\n", *count, *workers)
 
+	// ── Setup output file ──
 	var writer *bufio.Writer
 	if *output != "" {
 		f, err := os.Create(*output)
 		if err != nil {
-			boldRed.Printf("Error creating output file: %v\n", err)
+			boldRed.Printf("[ERROR] Gagal buat output file: %v\n", err)
 			os.Exit(1)
 		}
 		defer f.Close()
-		writer = bufio.NewWriterSize(f, 1<<20) // 1MB buffer
+		writer = bufio.NewWriterSize(f, 1<<20) // 1 MB buffer
 		defer writer.Flush()
-		boldGreen.Printf("[OUTPUT] Saving to: %s\n\n", *output)
+		boldGreen.Printf("[OUTPUT] Menyimpan ke: %s\n\n", *output)
 	}
 
 	type result struct {
@@ -64,8 +66,14 @@ func main() {
 		err error
 	}
 
-	jobs := make(chan int, *count)
-	results := make(chan result, *count)
+	// Buffer dibatasi agar tidak habiskan RAM untuk count besar
+	bufSize := *count
+	if bufSize > chanBufCap {
+		bufSize = chanBufCap
+	}
+
+	jobs := make(chan int, bufSize)
+	results := make(chan result, bufSize)
 
 	var wg sync.WaitGroup
 	for i := 0; i < *workers; i++ {
@@ -79,20 +87,21 @@ func main() {
 		}()
 	}
 
+	// Feed jobs ke workers
+	go func() {
+		for i := 1; i <= *count; i++ {
+			jobs <- i
+		}
+		close(jobs)
+	}()
+
+	// Tutup results setelah semua worker selesai
 	go func() {
 		wg.Wait()
 		close(results)
 	}()
 
-	for i := 1; i <= *count; i++ {
-		jobs <- i
-	}
-	close(jobs)
-
-	start := time.Now()
-	var generated atomic.Int64
-	var errCount atomic.Int64
-
+	// CSV header
 	if *csvMode {
 		header := "index,address,private_key"
 		if *showPub {
@@ -104,12 +113,15 @@ func main() {
 		}
 	}
 
-	collected := make([]result, 0, *count)
+	start := time.Now()
+	var generated, errCount int
+
+	// Kumpulkan dan urutkan hasil (order konsisten)
+	collected := make([]result, 0, min(*count, chanBufCap))
 	for r := range results {
 		collected = append(collected, r)
 	}
 
-	// Sort by index for consistent output
 	sorted := make([]result, *count)
 	for _, r := range collected {
 		if r.idx >= 1 && r.idx <= *count {
@@ -118,12 +130,16 @@ func main() {
 	}
 
 	for _, r := range sorted {
-		if r.err != nil {
-			boldRed.Printf("[ERROR] #%d: %v\n", r.idx, r.err)
-			errCount.Add(1)
+		// Slot kosong (seharusnya tidak terjadi, guard saja)
+		if r.w == nil && r.err == nil {
 			continue
 		}
-		generated.Add(1)
+		if r.err != nil {
+			boldRed.Printf("[ERROR] #%d: %v\n", r.idx, r.err)
+			errCount++
+			continue
+		}
+		generated++
 
 		if *csvMode {
 			line := fmt.Sprintf("%d,%s,%s", r.idx, r.w.Address, r.w.PrivateKey)
@@ -136,23 +152,23 @@ func main() {
 			}
 		} else {
 			boldGreen.Printf("[#%04d] ", r.idx)
-			fmt.Printf("Address:     ")
+			fmt.Printf("Address:  ")
 			boldCyan.Println(r.w.Address)
 
 			if *showPriv {
-				dimWhite.Printf("         PrivKey:     ")
+				dimWhite.Printf("         PrivKey:  ")
 				boldMagenta.Println("0x" + r.w.PrivateKey)
 			}
 			if *showPub {
-				dimWhite.Printf("         PubKey:      ")
+				dimWhite.Printf("         PubKey:   ")
 				fmt.Println("0x" + r.w.PublicKey[:32] + "...")
 			}
-			dimWhite.Println("         ─────────────────────────────────────────────")
+			dimWhite.Println("         ──────────────────────────────────────────────")
 
 			if writer != nil {
 				line := fmt.Sprintf("[#%04d] Address: %s | PrivKey: 0x%s", r.idx, r.w.Address, r.w.PrivateKey)
 				if *showPub {
-					line += fmt.Sprintf(" | PubKey: 0x%s", r.w.PublicKey)
+					line += " | PubKey: 0x" + r.w.PublicKey
 				}
 				fmt.Fprintln(writer, line)
 			}
@@ -160,12 +176,12 @@ func main() {
 	}
 
 	elapsed := time.Since(start)
-	speed := float64(generated.Load()) / elapsed.Seconds()
+	speed := float64(generated) / elapsed.Seconds()
 
 	fmt.Println()
-	boldGreen.Printf("✓ Generated:  %d wallets\n", generated.Load())
-	if errCount.Load() > 0 {
-		boldRed.Printf("✗ Errors:     %d\n", errCount.Load())
+	boldGreen.Printf("✓ Generated:  %d wallets\n", generated)
+	if errCount > 0 {
+		boldRed.Printf("✗ Errors:     %d\n", errCount)
 	}
 	boldYellow.Printf("⚡ Speed:      %.0f wallets/sec\n", speed)
 	boldCyan.Printf("⏱  Time:       %s\n", elapsed.Round(time.Millisecond))
@@ -173,4 +189,11 @@ func main() {
 		boldGreen.Printf("💾 Saved to:   %s\n", *output)
 	}
 	fmt.Println()
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
