@@ -1,155 +1,204 @@
 # ETH Wallet Tool (Go)
 
-High-speed Ethereum wallet generator dan balance checker menggunakan Go dengan concurrency penuh.
+High-speed Ethereum wallet generator, balance checker, dan auto-hunter dengan proxy support.
 
-## Fitur
+## Binary yang tersedia
 
-### Generator (`eth-generator`)
-- Generate ribuan wallet ETH per detik
-- Multi-goroutine worker pool
-- Output ke stdout atau file
-- Format normal atau CSV
-- Menampilkan address, private key, public key
+| Binary | Fungsi |
+|--------|--------|
+| `bin/eth-generator` | Generate wallet ETH baru secara massal |
+| `bin/eth-checker` | Cek balance dari daftar address |
+| `bin/eth-hunt` | **Auto generate + check sekaligus + proxy** |
 
-### Checker (`eth-checker`)
-- Cek balance ETH secara concurrent (ratusan address/detik dengan RPC bagus)
-- Round-robin load balancing ke multiple RPC endpoint
-- Auto-retry dengan ganti RPC saat rate-limit (429)
-- Support input: address tunggal, file teks, atau CSV
-- Filter hanya address yang punya balance
-- Simpan hasil ke file
+---
 
 ## Build
 
 ```bash
-# Build semua
+# Build semua sekaligus
 make build
 
-# Atau manual
+# Atau manual satu per satu
 go build -ldflags="-s -w" -o bin/eth-generator ./cmd/generator/
-go build -ldflags="-s -w" -o bin/eth-checker ./cmd/checker/
+go build -ldflags="-s -w" -o bin/eth-checker  ./cmd/checker/
+go build -ldflags="-s -w" -o bin/eth-hunt     ./cmd/hunt/
 ```
 
-## Penggunaan
+---
 
-### Generator
+## eth-hunt — Auto Generate + Check (Rekomendasi)
+
+Tool utama yang generate wallet baru dan langsung cek balance secara otomatis.
+Wallet yang punya balance langsung disimpan ke `found.txt`.
 
 ```bash
-# Generate 10 wallet (default)
-./bin/eth-generator
+# Mulai hunting (tekan Ctrl+C untuk berhenti)
+./bin/eth-hunt
 
-# Generate 1000 wallet dengan 8 worker
-./bin/eth-generator -n 1000 -workers 8
+# Lebih banyak worker = lebih cepat
+./bin/eth-hunt -workers 16
 
-# Generate ke file
-./bin/eth-generator -n 5000 -o wallets.txt
+# Gunakan RPC sendiri (lebih cepat & stabil)
+./bin/eth-hunt -workers 32 -rpc "https://mainnet.infura.io/v3/KEY"
 
-# Format CSV (mudah diimport spreadsheet)
-./bin/eth-generator -n 1000 -csv -o wallets.csv
+# Dengan proxy (auto-fetch dari internet)
+./bin/eth-hunt -proxy -fetch-proxy
+
+# Dengan proxy dari file yang sudah ada
+./bin/eth-hunt -proxy
+
+# Simpan ke file custom
+./bin/eth-hunt -o hasil_hunt.txt -stats 10s
+```
+
+**Flag eth-hunt:**
+| Flag | Default | Deskripsi |
+|------|---------|-----------|
+| `-workers` | CPU*3 | Jumlah goroutine concurrent |
+| `-rpc` | 5 public RPCs | Comma-separated RPC URLs |
+| `-timeout` | 12s | Timeout per request |
+| `-retries` | 3 | Retry per wallet |
+| `-o` | found.txt | File output wallet funded |
+| `-stats` | 5s | Interval tampilkan statistik |
+| `-proxy` | false | Aktifkan proxy |
+| `-pfile` | proxies.txt | Path file proxy |
+| `-fetch-proxy` | false | Fetch & validasi proxy baru dari internet |
+| `-proxy-workers` | 50 | Goroutine untuk validasi proxy |
+
+---
+
+## eth-generator — Bulk Wallet Generator
+
+```bash
+# Generate 1000 wallet
+./bin/eth-generator -n 1000
+
+# Dengan 8 worker, simpan ke file
+./bin/eth-generator -n 10000 -workers 8 -o wallets.txt
+
+# Format CSV
+./bin/eth-generator -n 5000 -csv -o wallets.csv
 
 # Tampilkan public key juga
 ./bin/eth-generator -n 10 -pub
 
-# Benchmark 10000 wallet
-./bin/eth-generator -n 10000 -workers 8 -o /dev/null
+# Benchmark 100k wallet
+./bin/eth-generator -n 100000 -workers 16 -o /dev/null
 ```
 
-**Flag:**
+**Flag eth-generator:**
 | Flag | Default | Deskripsi |
 |------|---------|-----------|
-| `-n` | 10 | Jumlah wallet yang digenerate |
-| `-workers` | CPU count | Jumlah goroutine concurrent |
+| `-n` | 10 | Jumlah wallet |
+| `-workers` | CPU count | Jumlah goroutine |
 | `-o` | stdout | Output file |
 | `-priv` | true | Tampilkan private key |
 | `-pub` | false | Tampilkan public key |
-| `-csv` | false | Output format CSV |
+| `-csv` | false | Format CSV |
 
-### Checker
+---
+
+## eth-checker — Balance Checker dari File
 
 ```bash
 # Cek satu address
 ./bin/eth-checker -addr 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
 
-# Cek dari file (satu address per baris)
+# Cek dari file (satu address per baris, atau CSV)
 ./bin/eth-checker -f addresses.txt
-
-# Cek dari CSV (format: index,address,privkey atau address:privkey)
-./bin/eth-checker -f wallets.csv
 
 # Hanya tampilkan yang punya balance
 ./bin/eth-checker -f addresses.txt -funded
 
-# Custom RPC (gunakan sendiri untuk lebih cepat & stabil)
-./bin/eth-checker -addr 0x... -rpc "https://mainnet.infura.io/v3/YOUR_KEY"
+# Gunakan proxy
+./bin/eth-checker -f addresses.txt -proxy -fetch-proxy
 
-# Multi-RPC untuk load balancing
-./bin/eth-checker -f addresses.txt -rpc "https://rpc1.com,https://rpc2.com,https://rpc3.com"
+# Custom RPC
+./bin/eth-checker -f addresses.txt -rpc "https://mainnet.infura.io/v3/KEY" -workers 50
 
-# Simpan hasil funded ke file
+# Simpan hasil ke file
 ./bin/eth-checker -f addresses.txt -funded -o funded.txt
 
-# Atur concurrency & timeout
-./bin/eth-checker -f addresses.txt -workers 20 -timeout 10s -retries 3
-
-# Filter minimum balance (contoh: hanya > 0.1 ETH)
+# Filter minimum balance
 ./bin/eth-checker -f addresses.txt -min 0.1 -funded
 ```
 
-**Flag:**
+**Flag eth-checker:**
 | Flag | Default | Deskripsi |
 |------|---------|-----------|
-| `-f` | - | File berisi daftar address |
-| `-addr` | - | Single address untuk dicek |
-| `-rpc` | 5 public RPCs | Comma-separated RPC URLs |
-| `-workers` | CPU*2 | Jumlah goroutine concurrent |
-| `-timeout` | 15s | Timeout per request RPC |
-| `-retries` | 4 | Retry count (ganti RPC tiap retry) |
+| `-f` | - | File daftar address |
+| `-addr` | - | Single address |
+| `-rpc` | 5 public RPCs | RPC URLs |
+| `-workers` | CPU*2 | Goroutine concurrent |
+| `-timeout` | 15s | Timeout per request |
+| `-retries` | 4 | Retry per address |
 | `-delay` | 200ms | Delay antar retry |
 | `-funded` | false | Hanya tampilkan yang punya balance |
-| `-o` | - | File output untuk funded address |
-| `-min` | 0 | Minimum ETH balance untuk ditampilkan |
+| `-o` | - | Output file |
+| `-min` | 0 | Minimum ETH balance |
+| `-proxy` | false | Aktifkan proxy |
+| `-pfile` | proxies.txt | File proxy |
+| `-fetch-proxy` | false | Fetch proxy baru |
+| `-proxy-workers` | 50 | Worker validasi proxy |
 
-## Tips Performa
+---
 
-### Untuk kecepatan maksimal, gunakan RPC berbayar:
-- **Infura**: `https://mainnet.infura.io/v3/YOUR_PROJECT_ID`
-- **Alchemy**: `https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY`
-- **QuickNode**: dari dashboard QuickNode
-- **Self-hosted**: node ETH sendiri (paling cepat)
+## Sistem Proxy
 
-### Rekomendasi setting:
+Proxy diambil otomatis dari 7 sumber GitHub proxy list publik, divalidasi, dan disimpan ke `proxies.txt`.
+
+### Cara kerja:
+1. `-fetch-proxy` → ambil dari internet, validasi setiap proxy, simpan yang aktif ke `proxies.txt`
+2. Saat hunting/checking, proxy dipakai secara round-robin
+3. Proxy yang gagal 3x otomatis dibuang dari pool
+4. Jika pool proxy habis → auto-fetch ulang dari internet
+5. Setiap 2 menit → cek apakah perlu refetch
+
 ```bash
-# Dengan RPC berbayar bisa gunakan banyak workers
-./bin/eth-checker -f big_list.txt -rpc "https://mainnet.infura.io/v3/KEY" -workers 50 -funded
-
-# Generator 100k wallet cepat
-./bin/eth-generator -n 100000 -workers 16 -csv -o 100k_wallets.csv
+# Fetch proxy tanpa langsung hunt (jalankan dulu, baru hunt)
+./bin/eth-hunt -fetch-proxy -workers 2 &   # biarkan jalan background
+sleep 60 && kill %1                        # tunggu 60 detik lalu stop
+# Sekarang proxies.txt sudah terisi
+./bin/eth-hunt -proxy -workers 16          # hunt pakai proxy yang sudah ada
 ```
 
-## Format File Input (Checker)
+### Sumber proxy:
+- TheSpeedX PROXY-List (HTTP)
+- clarketm proxy-list
+- ShiftyTR Proxy-List
+- monosans proxy-list
+- jetkai proxy-list
+- mertguvencli http-proxy-list
+- roosterkid openproxylist
 
-File address mendukung berbagai format:
+---
+
+## Format Input File Checker
+
 ```
 # Komentar diawali #
 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
-0xAbCd...
 
-# Format CSV juga didukung:
+# CSV (index,address,privkey)
 1,0xAddress1,privkey1
-2,0xAddress2,privkey2
 
-# Format address:privkey:
+# Format address:privkey
 0xAddress1:privkey1
 ```
 
-## RPC Publik Gratis (built-in)
+---
 
-| Endpoint | Keterangan |
-|----------|------------|
-| `https://eth.llamarpc.com` | LlamaNodes, stabil |
-| `https://cloudflare-eth.com` | Cloudflare |
-| `https://ethereum.publicnode.com` | PublicNode |
-| `https://rpc.payload.de` | Payload |
-| `https://eth-mainnet.public.blastapi.io` | Blast API |
+## Tips Performa
 
-> RPC gratis memiliki rate limit. Untuk penggunaan besar, gunakan RPC berbayar.
+| Mode | Kecepatan |
+|------|-----------|
+| Generator saja | ~10.000–100.000 wallet/detik |
+| Hunt (free RPC) | ~10–30 wallet/detik |
+| Hunt (RPC berbayar) | ~100–1000 wallet/detik |
+| Hunt + banyak proxy | Bisa lebih tinggi lagi |
+
+**RPC berbayar yang direkomendasikan:**
+- [Infura](https://infura.io) — `https://mainnet.infura.io/v3/YOUR_KEY`
+- [Alchemy](https://alchemy.com) — `https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY`
+- [QuickNode](https://quicknode.com) — dari dashboard QuickNode
+- Self-hosted full node — tercepat & tanpa limit
