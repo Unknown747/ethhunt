@@ -1,502 +1,662 @@
-// eth-hunt: Generator + Checker otomatis terintegrasi dengan proxy support
+// eth-hunt: Auto generate + check wallet Ethereum dengan semua fitur terintegrasi
 package main
 
 import (
-        "bufio"
-        "context"
-        "encoding/json"
-        "flag"
-        "fmt"
-        "io"
-        "math/big"
-        "net/http"
-        "os"
-        "os/signal"
-        "path/filepath"
-        "runtime"
-        "strings"
-        "sync"
-        "sync/atomic"
-        "syscall"
-        "time"
+	"bufio"
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"math/big"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
 
-        "github.com/fatih/color"
+	"github.com/fatih/color"
 
-        "eth-wallet-tool/internal/proxy"
-        "eth-wallet-tool/internal/wallet"
+	"eth-wallet-tool/internal/config"
+	"eth-wallet-tool/internal/mnemonic"
+	"eth-wallet-tool/internal/notify"
+	"eth-wallet-tool/internal/proxy"
+	"eth-wallet-tool/internal/rpc"
+	"eth-wallet-tool/internal/wallet"
 )
 
-// ─── Warna output ────────────────────────────────────────────────────────────
+// ─── Warna ───────────────────────────────────────────────────────────────────
 
 var (
-        cCyan    = color.New(color.FgCyan, color.Bold)
-        cGreen   = color.New(color.FgGreen, color.Bold)
-        cYellow  = color.New(color.FgYellow, color.Bold)
-        cRed     = color.New(color.FgRed, color.Bold)
-        cWhite   = color.New(color.FgWhite, color.Bold)
-        cDim     = color.New(color.FgWhite, color.Faint)
-        cMagenta = color.New(color.FgMagenta, color.Bold)
+	cCyan    = color.New(color.FgCyan, color.Bold)
+	cGreen   = color.New(color.FgGreen, color.Bold)
+	cYellow  = color.New(color.FgYellow, color.Bold)
+	cRed     = color.New(color.FgRed, color.Bold)
+	cWhite   = color.New(color.FgWhite, color.Bold)
+	cDim     = color.New(color.FgWhite, color.Faint)
+	cMagenta = color.New(color.FgMagenta, color.Bold)
 )
 
-// ─── Default RPC endpoints ───────────────────────────────────────────────────
+// ─── Banner ───────────────────────────────────────────────────────────────────
 
-var defaultRPCs = []string{
-        "https://eth.llamarpc.com",
-        "https://ethereum.publicnode.com",
-        "https://eth-mainnet.public.blastapi.io",
-        "https://rpc.payload.de",
-        "https://1rpc.io/eth",
+func printBanner() {
+	cCyan.Print(`
+╔════════════════════════════════════════════════════════╗
+║           ETH WALLET HUNTER  v3.0                      ║
+║   Auto Generate + Check + Multi-Chain + Proxy          ║
+╚════════════════════════════════════════════════════════╝
+`)
 }
 
-// ─── RPC helper ──────────────────────────────────────────────────────────────
+// ─── Resume State ─────────────────────────────────────────────────────────────
 
-type rpcReq struct {
-        JSONRPC string        `json:"jsonrpc"`
-        Method  string        `json:"method"`
-        Params  []interface{} `json:"params"`
-        ID      int           `json:"id"`
+type ResumeState struct {
+	Generated int64 `json:"generated"`
+	Checked   int64 `json:"checked"`
+	Found     int64 `json:"found"`
+	Sessions  int64 `json:"sessions"`
 }
 
-type rpcResp struct {
-        Result interface{} `json:"result"`
-        Error  *struct {
-                Code    int    `json:"code"`
-                Message string `json:"message"`
-        } `json:"error"`
+func loadResume(path string) *ResumeState {
+	f, err := os.Open(path)
+	if err != nil {
+		return &ResumeState{}
+	}
+	defer f.Close()
+	var s ResumeState
+	if err := json.NewDecoder(f).Decode(&s); err != nil {
+		return &ResumeState{}
+	}
+	return &s
 }
 
-// getBalance mengecek ETH balance melalui satu HTTP client
-func getBalance(ctx context.Context, client *http.Client, rpcURL, address string) (*big.Int, error) {
-        body, _ := json.Marshal(rpcReq{
-                JSONRPC: "2.0", Method: "eth_getBalance",
-                Params: []interface{}{address, "latest"}, ID: 1,
-        })
+func saveResume(path string, s *ResumeState) {
+	f, err := os.Create(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	json.NewEncoder(f).Encode(s)
+}
 
-        req, err := http.NewRequestWithContext(ctx, "POST", rpcURL, strings.NewReader(string(body)))
-        if err != nil {
-                return nil, err
-        }
-        req.Header.Set("Content-Type", "application/json")
+// ─── Stats Logger (CSV) ───────────────────────────────────────────────────────
 
-        resp, err := client.Do(req)
-        if err != nil {
-                return nil, err
-        }
-        defer resp.Body.Close()
+type statsLogger struct {
+	mu   sync.Mutex
+	file *os.File
+	buf  *bufio.Writer
+}
 
-        data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<15))
-        if err != nil {
-                return nil, err
-        }
+func newStatsLogger(path string) *statsLogger {
+	if path == "" {
+		return nil
+	}
+	needHeader := true
+	if _, err := os.Stat(path); err == nil {
+		needHeader = false
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil
+	}
+	sl := &statsLogger{file: f, buf: bufio.NewWriter(f)}
+	if needHeader {
+		fmt.Fprintln(sl.buf, "timestamp,generated,checked,found,errors,gen_rate,check_rate,rpc_alive")
+		sl.buf.Flush()
+	}
+	return sl
+}
 
-        var r rpcResp
-        if err := json.Unmarshal(data, &r); err != nil {
-                return nil, fmt.Errorf("unmarshal: %w", err)
-        }
-        if r.Error != nil {
-                if r.Error.Code == 429 {
-                        return nil, fmt.Errorf("rate-limited")
-                }
-                return nil, fmt.Errorf("rpc %d: %s", r.Error.Code, r.Error.Message)
-        }
+func (sl *statsLogger) write(generated, checked, found, errors int64, genRate, checkRate float64, rpcAlive int) {
+	if sl == nil {
+		return
+	}
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	fmt.Fprintf(sl.buf, "%s,%d,%d,%d,%d,%.2f,%.2f,%d\n",
+		time.Now().Format(time.RFC3339),
+		generated, checked, found, errors, genRate, checkRate, rpcAlive)
+	sl.buf.Flush()
+}
 
-        hexStr, ok := r.Result.(string)
-        if !ok {
-                return nil, fmt.Errorf("bad result type")
-        }
-        hexStr = strings.TrimPrefix(hexStr, "0x")
-        if hexStr == "" {
-                hexStr = "0"
-        }
-        n := new(big.Int)
-        n.SetString(hexStr, 16)
-        return n, nil
+func (sl *statsLogger) close() {
+	if sl == nil {
+		return
+	}
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	sl.buf.Flush()
+	sl.file.Close()
 }
 
 // ─── Stats ────────────────────────────────────────────────────────────────────
 
 type Stats struct {
-        Generated atomic.Int64
-        Checked   atomic.Int64
-        Found     atomic.Int64
-        Errors    atomic.Int64
-        startTime time.Time
+	Generated atomic.Int64
+	Checked   atomic.Int64
+	Found     atomic.Int64
+	Errors    atomic.Int64
+	startTime time.Time
 }
 
 func (s *Stats) genRate() float64 {
-        elapsed := time.Since(s.startTime).Seconds()
-        if elapsed == 0 {
-                return 0
-        }
-        return float64(s.Generated.Load()) / elapsed
+	el := time.Since(s.startTime).Seconds()
+	if el == 0 {
+		return 0
+	}
+	return float64(s.Generated.Load()) / el
 }
 
 func (s *Stats) checkRate() float64 {
-        elapsed := time.Since(s.startTime).Seconds()
-        if elapsed == 0 {
-                return 0
-        }
-        return float64(s.Checked.Load()) / elapsed
-}
-
-// ─── Result ───────────────────────────────────────────────────────────────────
-
-type HuntResult struct {
-        w       *wallet.Wallet
-        balance *big.Float
-}
-
-// ─── Banner ───────────────────────────────────────────────────────────────────
-
-func printBanner() {
-        cCyan.Print(`
-╔════════════════════════════════════════════════════════╗
-║           ETH WALLET HUNTER  v2.0                      ║
-║   Auto Generate + Check + Proxy Support                ║
-╚════════════════════════════════════════════════════════╝
-`)
-}
-
-func weiToEth(wei *big.Int) *big.Float {
-        divisor := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
-        return new(big.Float).Quo(new(big.Float).SetInt(wei), divisor)
-}
-
-// ─── Worker Pool ─────────────────────────────────────────────────────────────
-
-type workerPool struct {
-        jobs     chan *wallet.Wallet
-        results  chan HuntResult
-        rpcList  []string
-        pm       *proxy.Manager
-        useProxy bool
-        timeout  time.Duration
-        retries  int
-        ctx      context.Context // dipakai untuk fast shutdown
-        wg       sync.WaitGroup
-        stats    *Stats
-        rpcIdx   atomic.Int64
-}
-
-func newWorkerPool(ctx context.Context, n int, rpcList []string, pm *proxy.Manager, useProxy bool, timeout time.Duration, retries int, stats *Stats) *workerPool {
-        wp := &workerPool{
-                jobs:     make(chan *wallet.Wallet, n*4),
-                results:  make(chan HuntResult, n*2),
-                rpcList:  rpcList,
-                pm:       pm,
-                useProxy: useProxy,
-                timeout:  timeout,
-                retries:  retries,
-                ctx:      ctx,
-                stats:    stats,
-        }
-        for i := 0; i < n; i++ {
-                wp.wg.Add(1)
-                go wp.worker()
-        }
-        return wp
-}
-
-func (wp *workerPool) nextRPC() string {
-        idx := wp.rpcIdx.Add(1) - 1
-        return wp.rpcList[idx%int64(len(wp.rpcList))]
-}
-
-func (wp *workerPool) worker() {
-        defer wp.wg.Done()
-
-        for w := range wp.jobs {
-                // Periksa context sebelum memproses
-                select {
-                case <-wp.ctx.Done():
-                        return
-                default:
-                }
-
-                var balWei *big.Int
-                var err error
-
-                for attempt := 0; attempt <= wp.retries; attempt++ {
-                        // Hentikan retry jika context sudah cancel
-                        select {
-                        case <-wp.ctx.Done():
-                                wp.stats.Errors.Add(1)
-                                goto nextWallet
-                        default:
-                        }
-
-                        if attempt > 0 {
-                                select {
-                                case <-wp.ctx.Done():
-                                        wp.stats.Errors.Add(1)
-                                        goto nextWallet
-                                case <-time.After(time.Duration(attempt) * 150 * time.Millisecond):
-                                }
-                        }
-
-                        rpcURL := wp.nextRPC()
-
-                        var client *http.Client
-                        if wp.useProxy && wp.pm != nil && wp.pm.Count() > 0 {
-                                px := wp.pm.Next()
-                                if px != nil {
-                                        client = proxy.BuildHTTPClient(px.Address, wp.timeout)
-                                } else {
-                                        client = proxy.BuildHTTPClient("", wp.timeout)
-                                }
-                        } else {
-                                client = proxy.BuildHTTPClient("", wp.timeout)
-                        }
-
-                        // Gunakan ctx utama agar langsung cancel saat shutdown
-                        reqCtx, cancel := context.WithTimeout(wp.ctx, wp.timeout)
-                        balWei, err = getBalance(reqCtx, client, rpcURL, w.Address)
-                        cancel()
-
-                        if err == nil {
-                                break
-                        }
-                }
-
-                wp.stats.Checked.Add(1)
-                if err != nil {
-                        wp.stats.Errors.Add(1)
-                        goto nextWallet
-                }
-
-                if balWei.Cmp(big.NewInt(0)) > 0 {
-                        wp.stats.Found.Add(1)
-                        select {
-                        case wp.results <- HuntResult{w: w, balance: weiToEth(balWei)}:
-                        case <-wp.ctx.Done():
-                                return
-                        }
-                }
-
-        nextWallet:
-        }
-}
-
-func (wp *workerPool) close() {
-        close(wp.jobs)
-        wp.wg.Wait()
-        close(wp.results)
+	el := time.Since(s.startTime).Seconds()
+	if el == 0 {
+		return 0
+	}
+	return float64(s.Checked.Load()) / el
 }
 
 // ─── Found Writer ─────────────────────────────────────────────────────────────
 
 type foundWriter struct {
-        mu   sync.Mutex
-        file *os.File
-        buf  *bufio.Writer
+	mu   sync.Mutex
+	file *os.File
+	buf  *bufio.Writer
 }
 
 func newFoundWriter(path string) (*foundWriter, error) {
-        f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-        if err != nil {
-                return nil, err
-        }
-        return &foundWriter{file: f, buf: bufio.NewWriter(f)}, nil
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, err
+	}
+	return &foundWriter{file: f, buf: bufio.NewWriter(f)}, nil
 }
 
-func (fw *foundWriter) write(r HuntResult) {
-        fw.mu.Lock()
-        defer fw.mu.Unlock()
-        balF, _ := r.balance.Float64()
-        fmt.Fprintf(fw.buf, "ADDRESS=%s | PRIVKEY=0x%s | BALANCE=%.8f ETH\n",
-                r.w.Address, r.w.PrivateKey, balF)
-        fw.buf.Flush()
+func (fw *foundWriter) write(address, privKey, mnem string, ethBal float64, currency string, tokens map[string]float64) {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	line := fmt.Sprintf("ADDRESS=%s | PRIVKEY=0x%s | BALANCE=%.8f %s",
+		address, privKey, ethBal, currency)
+	for name, bal := range tokens {
+		if bal > 0 {
+			line += fmt.Sprintf(" | %s=%.6f", name, bal)
+		}
+	}
+	if mnem != "" {
+		line += " | MNEMONIC=" + mnem
+	}
+	fmt.Fprintln(fw.buf, line)
+	fw.buf.Flush()
 }
 
 func (fw *foundWriter) close() {
-        fw.mu.Lock()
-        defer fw.mu.Unlock()
-        fw.buf.Flush()
-        fw.file.Close()
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	fw.buf.Flush()
+	fw.file.Close()
+}
+
+// ─── Worker Pool ─────────────────────────────────────────────────────────────
+
+type walletEntry struct {
+	address    string
+	privateKey string
+	mnemonic   string
+}
+
+type batchJob struct {
+	wallets []walletEntry
+}
+
+type workerPool struct {
+	jobs    chan batchJob
+	results chan foundEntry
+	rpcMgr  *rpc.Manager
+	pm      *proxy.Manager
+	useProxy bool
+	tokens  []rpc.TokenCheck
+	ctx     context.Context
+	wg      sync.WaitGroup
+	stats   *Stats
+}
+
+type foundEntry struct {
+	address    string
+	privateKey string
+	mnemonic   string
+	ethWei     *big.Int
+	tokenBals  map[string]*big.Int
+}
+
+func newWorkerPool(ctx context.Context, n int, rpcMgr *rpc.Manager, pm *proxy.Manager, useProxy bool, tokens []rpc.TokenCheck, stats *Stats) *workerPool {
+	wp := &workerPool{
+		jobs:     make(chan batchJob, n*2),
+		results:  make(chan foundEntry, n),
+		rpcMgr:   rpcMgr,
+		pm:       pm,
+		useProxy: useProxy,
+		tokens:   tokens,
+		ctx:      ctx,
+		stats:    stats,
+	}
+	for i := 0; i < n; i++ {
+		wp.wg.Add(1)
+		go wp.worker()
+	}
+	return wp
+}
+
+func (wp *workerPool) worker() {
+	defer wp.wg.Done()
+
+	for job := range wp.jobs {
+		select {
+		case <-wp.ctx.Done():
+			return
+		default:
+		}
+
+		addresses := make([]string, len(job.wallets))
+		for i, w := range job.wallets {
+			addresses[i] = w.address
+		}
+
+		batchRes, err := wp.rpcMgr.GetBalanceBatch(wp.ctx, addresses, wp.tokens)
+
+		wp.stats.Checked.Add(int64(len(addresses)))
+
+		if err != nil {
+			wp.stats.Errors.Add(int64(len(addresses)))
+			continue
+		}
+
+		for _, w := range job.wallets {
+			ar, ok := batchRes[w.address]
+			if !ok {
+				continue
+			}
+			if rpc.HasAnyBalance(ar) {
+				tBals := make(map[string]*big.Int)
+				for k, v := range ar.Tokens {
+					tBals[k] = v
+				}
+				select {
+				case wp.results <- foundEntry{
+					address:    w.address,
+					privateKey: w.privateKey,
+					mnemonic:   w.mnemonic,
+					ethWei:     ar.ETH,
+					tokenBals:  tBals,
+				}:
+				case <-wp.ctx.Done():
+					return
+				}
+			}
+		}
+	}
+}
+
+func (wp *workerPool) close() {
+	close(wp.jobs)
+	wp.wg.Wait()
+	close(wp.results)
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 func main() {
-        workers := flag.Int("workers", runtime.NumCPU()*3, "jumlah worker concurrent")
-        rpcURLs := flag.String("rpc", "", "comma-separated RPC URLs (default: 5 public RPCs)")
-        useProxyFlag := flag.Bool("proxy", false, "gunakan proxy dari proxies.txt")
-        proxyFile := flag.String("pfile", "proxies.txt", "path file proxy")
-        fetchProxy := flag.Bool("fetch-proxy", false, "fetch & validasi proxy baru dari internet sekarang")
-        validateWorkers := flag.Int("proxy-workers", 50, "jumlah worker validasi proxy")
-        timeout := flag.Duration("timeout", 12*time.Second, "timeout per RPC request")
-        retries := flag.Int("retries", 3, "retry per wallet check")
-        outputFile := flag.String("o", "found.txt", "file output wallet yang punya balance")
-        statsInterval := flag.Duration("stats", 5*time.Second, "interval tampilkan statistik")
-        flag.Parse()
+	cfgFile := flag.String("config", "config.yaml", "path file konfigurasi")
+	workers := flag.Int("workers", 0, "jumlah worker (0=auto dari config)")
+	chainFlag := flag.String("chain", "", "chain: ethereum|bsc|polygon|arbitrum")
+	rpcURLs := flag.String("rpc", "", "comma-separated RPC URLs (override config)")
+	useProxyFlag := flag.Bool("proxy", false, "gunakan proxy")
+	proxyFile := flag.String("pfile", "", "path file proxy (override config)")
+	fetchProxy := flag.Bool("fetch-proxy", false, "fetch & validasi proxy baru sekarang")
+	outputFile := flag.String("o", "", "file output (override config)")
+	statsInterval := flag.Duration("stats", 0, "interval statistik (override config)")
+	modeFlag := flag.String("mode", "", "random atau mnemonic (override config)")
+	testTelegram := flag.Bool("test-telegram", false, "test kirim pesan Telegram")
+	flag.Parse()
 
-        printBanner()
+	printBanner()
 
-        // ── RPC list ──
-        var rpcList []string
-        if *rpcURLs != "" {
-                for _, u := range strings.Split(*rpcURLs, ",") {
-                        u = strings.TrimSpace(u)
-                        if u != "" {
-                                rpcList = append(rpcList, u)
-                        }
-                }
-        } else {
-                rpcList = defaultRPCs
-        }
+	// ── Load config ──
+	cfg, err := config.Load(*cfgFile)
+	if err != nil {
+		cRed.Printf("[WARN] Config: %v — pakai default\n", err)
+		cfg = config.Default()
+	}
 
-        // ── Proxy Manager ──
-        pm := proxy.NewManager(*proxyFile, 3)
-        pm.OnRefetch = func(count int) {
-                cGreen.Printf("\n[PROXY] +%d proxy baru berhasil divalidasi dan disimpan\n", count)
-        }
-        pm.OnRemove = func(addr string) {
-                cDim.Printf("[PROXY] Proxy mati dibuang: %s\n", addr)
-        }
+	// Override dari flag
+	chainName := cfg.Chain
+	if *chainFlag != "" {
+		chainName = *chainFlag
+	}
+	genMode := cfg.Generator.Mode
+	if *modeFlag != "" {
+		genMode = *modeFlag
+	}
+	pFile := cfg.Proxy.File
+	if *proxyFile != "" {
+		pFile = *proxyFile
+	}
+	useProxy := *useProxyFlag || cfg.Proxy.Enabled
+	foundFile := cfg.Output.FoundFile
+	if *outputFile != "" {
+		foundFile = *outputFile
+	}
+	statInterval := cfg.Hunt.StatsInterval
+	if *statsInterval > 0 {
+		statInterval = *statsInterval
+	}
 
-        ctx, cancel := context.WithCancel(context.Background())
-        defer cancel()
+	nWorkers := *workers
+	if nWorkers <= 0 {
+		nWorkers = cfg.Workers.Hunt
+	}
+	if nWorkers <= 0 {
+		nWorkers = runtime.NumCPU() * 3
+	}
 
-        if *fetchProxy || *useProxyFlag {
-                if err := pm.Load(); err != nil {
-                        cRed.Printf("[PROXY] Gagal load file: %v\n", err)
-                }
-                if *fetchProxy || pm.Count() == 0 {
-                        cYellow.Printf("[PROXY] Mengambil & memvalidasi proxy dari %d sumber...\n", len(proxy.ProxySources))
-                        for _, src := range proxy.ProxySources {
-                                cDim.Printf("        → %s\n", src)
-                        }
-                        pm.FetchAndValidate(ctx, *validateWorkers)
-                        cGreen.Printf("[PROXY] Total proxy valid: %d\n", pm.Count())
-                } else {
-                        cGreen.Printf("[PROXY] Loaded %d proxy dari %s\n", pm.Count(), *proxyFile)
-                }
-                go pm.AutoRefresh(ctx, 10, 2*time.Minute)
-        }
+	// ── Telegram ──
+	tg := notify.NewTelegram(notify.TelegramConfig{
+		Enabled: cfg.Telegram.Enabled,
+		Token:   cfg.Telegram.Token,
+		ChatID:  cfg.Telegram.ChatID,
+	})
 
-        // ── Output file ──
-        absOut, _ := filepath.Abs(*outputFile)
-        fw, err := newFoundWriter(*outputFile)
-        if err != nil {
-                cRed.Printf("[ERROR] Gagal buat output file: %v\n", err)
-                os.Exit(1)
-        }
-        defer fw.close()
+	if *testTelegram {
+		cYellow.Println("[TELEGRAM] Mengirim pesan test...")
+		if err := tg.SendTest(); err != nil {
+			cRed.Printf("[TELEGRAM] GAGAL: %v\n", err)
+		} else {
+			cGreen.Println("[TELEGRAM] Berhasil! Cek Telegram kamu.")
+		}
+		return
+	}
 
-        // ── Print config ──
-        cYellow.Printf("\n[CONFIG] Workers:   %d\n", *workers)
-        cYellow.Printf("[CONFIG] RPC Nodes: %d endpoint\n", len(rpcList))
-        for i, r := range rpcList {
-                cDim.Printf("         [%d] %s\n", i+1, r)
-        }
-        if *useProxyFlag {
-                cYellow.Printf("[CONFIG] Proxy:     ON (%d aktif dari %s)\n", pm.Count(), *proxyFile)
-        } else {
-                cYellow.Printf("[CONFIG] Proxy:     OFF\n")
-        }
-        cYellow.Printf("[CONFIG] Output:    %s\n", absOut)
-        cYellow.Printf("[CONFIG] Timeout:   %s | Retries: %d\n", *timeout, *retries)
-        cGreen.Printf("\n[START] Hunting dimulai... (Ctrl+C untuk berhenti)\n\n")
+	// ── RPC Endpoints ──
+	var endpoints []string
+	var currency string
+	if *rpcURLs != "" {
+		for _, u := range strings.Split(*rpcURLs, ",") {
+			u = strings.TrimSpace(u)
+			if u != "" {
+				endpoints = append(endpoints, u)
+			}
+		}
+		currency = "ETH"
+	} else {
+		var e error
+		endpoints, currency, e = cfg.GetChainRPCs(chainName)
+		if e != nil {
+			cRed.Printf("[ERROR] %v\n", e)
+			os.Exit(1)
+		}
+	}
 
-        // ── Init stats & pool ──
-        stats := &Stats{startTime: time.Now()}
-        pool := newWorkerPool(ctx, *workers, rpcList, pm, *useProxyFlag, *timeout, *retries, stats)
+	// ── Token checks ──
+	var tokenChecks []rpc.TokenCheck
+	if cfg.Tokens.CheckERC20 && chainName == "ethereum" {
+		for _, t := range cfg.Tokens.List {
+			tokenChecks = append(tokenChecks, rpc.TokenCheck{
+				Name: t.Name, Address: t.Address, Decimals: t.Decimals,
+			})
+		}
+	}
 
-        // ── Signal handler ──
-        sig := make(chan os.Signal, 1)
-        signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	// ── Proxy Manager ──
+	pm := proxy.NewManager(pFile, cfg.Proxy.MaxFails)
+	pm.OnRefetch = func(count int) {
+		cGreen.Printf("\n[PROXY] +%d proxy baru berhasil divalidasi\n", count)
+	}
+	pm.OnRemove = func(addr string) {
+		cDim.Printf("[PROXY] Proxy mati dibuang: %s\n", addr)
+	}
 
-        // ── Stats printer ──
-        go func() {
-                ticker := time.NewTicker(*statsInterval)
-                defer ticker.Stop()
-                for {
-                        select {
-                        case <-ctx.Done():
-                                return
-                        case <-ticker.C:
-                                elapsed := time.Since(stats.startTime).Round(time.Second)
-                                proxyInfo := ""
-                                if *useProxyFlag {
-                                        proxyInfo = fmt.Sprintf(" | Proxy: %d aktif", pm.Count())
-                                }
-                                cDim.Printf("\r[%s] Gen: %d (%.0f/s) | Chk: %d (%.0f/s) | Found: %d | Err: %d%s   ",
-                                        elapsed,
-                                        stats.Generated.Load(), stats.genRate(),
-                                        stats.Checked.Load(), stats.checkRate(),
-                                        stats.Found.Load(),
-                                        stats.Errors.Load(),
-                                        proxyInfo,
-                                )
-                        }
-                }
-        }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-        // ── Result printer ──
-        go func() {
-                for r := range pool.results {
-                        balF, _ := r.balance.Float64()
-                        fmt.Println()
-                        cMagenta.Println("╔══════════════════════════════════════════════════╗")
-                        cMagenta.Println("║       💰 WALLET DENGAN BALANCE DITEMUKAN!        ║")
-                        cMagenta.Println("╚══════════════════════════════════════════════════╝")
-                        cWhite.Printf("  Address:  %s\n", r.w.Address)
-                        cGreen.Printf("  Balance:  %.8f ETH\n", balF)
-                        cYellow.Printf("  PrivKey:  0x%s\n", r.w.PrivateKey)
-                        cDim.Printf("  Disimpan ke: %s\n", absOut)
-                        fmt.Println()
-                        fw.write(r)
-                }
-        }()
+	tg.Start(ctx)
 
-        // ── Generator → worker jobs ──
-        go func() {
-                for {
-                        select {
-                        case <-ctx.Done():
-                                return
-                        default:
-                        }
-                        w, err := wallet.Generate()
-                        if err != nil {
-                                continue
-                        }
-                        stats.Generated.Add(1)
-                        select {
-                        case pool.jobs <- w:
-                        case <-ctx.Done():
-                                return
-                        }
-                }
-        }()
+	if *fetchProxy || useProxy {
+		if err := pm.Load(); err != nil {
+			cRed.Printf("[PROXY] Gagal load file: %v\n", err)
+		}
+		if *fetchProxy || pm.Count() == 0 {
+			cYellow.Printf("[PROXY] Mengambil & memvalidasi proxy dari %d sumber...\n", len(proxy.ProxySources))
+			pm.FetchAndValidate(ctx, cfg.Proxy.ValidateWorkers)
+			cGreen.Printf("[PROXY] Total proxy valid: %d\n", pm.Count())
+		} else {
+			cGreen.Printf("[PROXY] Loaded %d proxy dari %s\n", pm.Count(), pFile)
+		}
+		go pm.AutoRefresh(ctx, 10, 2*time.Minute)
+	}
 
-        // ── Tunggu sinyal stop ──
-        <-sig
-        cancel()
+	// ── RPC Manager ──
+	httpClient := &http.Client{
+		Timeout: cfg.RPC.Timeout,
+		Transport: &http.Transport{
+			MaxIdleConns:        200,
+			MaxIdleConnsPerHost: 50,
+			IdleConnTimeout:     60 * time.Second,
+		},
+	}
+	rpcMgr := rpc.NewManager(endpoints, httpClient,
+		cfg.RPC.Timeout, cfg.RPC.Retries,
+		cfg.RPC.DeadThreshold, cfg.RPC.DeadCooldown)
 
-        cYellow.Println("\n\n[STOP] Menghentikan... tunggu sebentar")
-        pool.close()
+	// ── Resume State ──
+	resume := loadResume(cfg.Output.ResumeFile)
+	resume.Sessions++
 
-        elapsed := time.Since(stats.startTime).Round(time.Millisecond)
+	// ── Found Writer ──
+	absOut, _ := filepath.Abs(foundFile)
+	fw, err := newFoundWriter(foundFile)
+	if err != nil {
+		cRed.Printf("[ERROR] Gagal buat output file: %v\n", err)
+		os.Exit(1)
+	}
+	defer fw.close()
 
-        fmt.Println()
-        cCyan.Println("════════════════════════════════════════════════════")
-        cWhite.Printf("  Total Generated:   %d wallets\n", stats.Generated.Load())
-        cWhite.Printf("  Total Checked:     %d wallets\n", stats.Checked.Load())
-        cGreen.Printf("  Found (balance>0): %d wallets\n", stats.Found.Load())
-        cRed.Printf("  Errors:            %d\n", stats.Errors.Load())
-        cYellow.Printf("  Gen Speed:         %.0f wallet/sec\n", stats.genRate())
-        cYellow.Printf("  Check Speed:       %.0f wallet/sec\n", stats.checkRate())
-        cCyan.Printf("  Total Time:        %s\n", elapsed)
-        if stats.Found.Load() > 0 {
-                cGreen.Printf("  📁 Hasil di:       %s\n", absOut)
-        }
-        cCyan.Println("════════════════════════════════════════════════════")
-        fmt.Println()
+	// ── Stats Logger ──
+	sl := newStatsLogger(cfg.Output.StatsLog)
+	defer sl.close()
 
-        // Simpan proxy aktif ke file
-        if *useProxyFlag && pm.Count() > 0 {
-                pm.Save()
-                cGreen.Printf("[PROXY] %d proxy aktif disimpan ke %s\n\n", pm.Count(), *proxyFile)
-        }
+	// ── Print config ──
+	chainCfg, _ := cfg.Chains[chainName]
+	cYellow.Printf("\n[CONFIG] Chain:      %s (%s)\n", chainCfg.Name, currency)
+	cYellow.Printf("[CONFIG] Mode:       %s\n", strings.ToUpper(genMode))
+	cYellow.Printf("[CONFIG] Workers:    %d | Batch: %d\n", nWorkers, cfg.RPC.BatchSize)
+	cYellow.Printf("[CONFIG] RPC Nodes:  %d endpoint\n", len(endpoints))
+	for i, ep := range endpoints {
+		cDim.Printf("         [%d] %s\n", i+1, ep)
+	}
+	if len(tokenChecks) > 0 {
+		names := make([]string, len(tokenChecks))
+		for i, t := range tokenChecks {
+			names[i] = t.Name
+		}
+		cYellow.Printf("[CONFIG] Tokens:     %s\n", strings.Join(names, ", "))
+	}
+	if useProxy {
+		cYellow.Printf("[CONFIG] Proxy:      ON (%d aktif)\n", pm.Count())
+	} else {
+		cYellow.Printf("[CONFIG] Proxy:      OFF\n")
+	}
+	if cfg.Telegram.Enabled {
+		cYellow.Printf("[CONFIG] Telegram:   ON (chat_id: %s)\n", cfg.Telegram.ChatID)
+	}
+	cYellow.Printf("[CONFIG] Output:     %s\n", absOut)
+	if cfg.Output.StatsLog != "" {
+		cYellow.Printf("[CONFIG] Stats CSV:  %s\n", cfg.Output.StatsLog)
+	}
+	if resume.Sessions > 1 {
+		cGreen.Printf("[RESUME] Sesi ke-%d | Total lalu: Gen=%d Chk=%d Found=%d\n",
+			resume.Sessions, resume.Generated, resume.Checked, resume.Found)
+	}
+	cGreen.Printf("\n[START] Hunting dimulai... (Ctrl+C untuk berhenti)\n\n")
+
+	// ── Stats & Workers ──
+	stats := &Stats{startTime: time.Now()}
+	pool := newWorkerPool(ctx, nWorkers, rpcMgr, pm, useProxy, tokenChecks, stats)
+
+	// ── Signal handler ──
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
+	// ── Stats printer ──
+	go func() {
+		ticker := time.NewTicker(statInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				elapsed := time.Since(stats.startTime).Round(time.Second)
+				proxyInfo := ""
+				if useProxy {
+					proxyInfo = fmt.Sprintf(" | Proxy: %d", pm.Count())
+				}
+				cDim.Printf("\r[%s] Gen: %d (%.0f/s) | Chk: %d (%.0f/s) | Found: %d | Err: %d | RPC: %d/%d%s   ",
+					elapsed,
+					stats.Generated.Load(), stats.genRate(),
+					stats.Checked.Load(), stats.checkRate(),
+					stats.Found.Load(),
+					stats.Errors.Load(),
+					rpcMgr.AliveCount(), len(endpoints),
+					proxyInfo,
+				)
+				// Simpan stats ke CSV
+				sl.write(stats.Generated.Load(), stats.Checked.Load(),
+					stats.Found.Load(), stats.Errors.Load(),
+					stats.genRate(), stats.checkRate(), rpcMgr.AliveCount())
+			}
+		}
+	}()
+
+	// ── Result printer ──
+	go func() {
+		for entry := range pool.results {
+			ethF, _ := rpc.WeiToDecimal(entry.ethWei, 18).Float64()
+			tokenFloats := map[string]float64{}
+			for k, v := range entry.tokenBals {
+				f, _ := rpc.WeiToDecimal(v, 6).Float64()
+				tokenFloats[k] = f
+			}
+
+			fmt.Println()
+			cMagenta.Println("╔══════════════════════════════════════════════════╗")
+			cMagenta.Println("║       💰 WALLET DENGAN BALANCE DITEMUKAN!        ║")
+			cMagenta.Println("╚══════════════════════════════════════════════════╝")
+			cWhite.Printf("  Address:  %s\n", entry.address)
+			cGreen.Printf("  Balance:  %.8f %s\n", ethF, currency)
+			for name, bal := range tokenFloats {
+				if bal > 0 {
+					cGreen.Printf("  %-8s  %.6f\n", name+":", bal)
+				}
+			}
+			cYellow.Printf("  PrivKey:  0x%s\n", entry.privateKey)
+			if entry.mnemonic != "" {
+				cYellow.Printf("  Mnemonic: %s\n", entry.mnemonic)
+			}
+			cDim.Printf("  Disimpan ke: %s\n\n", absOut)
+
+			fw.write(entry.address, entry.privateKey, entry.mnemonic, ethF, currency, tokenFloats)
+			tg.Notify(notify.FormatFound(entry.address, entry.privateKey, ethF, currency, tokenFloats))
+		}
+	}()
+
+	// ── Generator → Batcher → Workers ──
+	batchSize := cfg.RPC.BatchSize
+	go func() {
+		batch := make([]walletEntry, 0, batchSize)
+		for {
+			select {
+			case <-ctx.Done():
+				if len(batch) > 0 {
+					select {
+					case pool.jobs <- batchJob{wallets: batch}:
+					default:
+					}
+				}
+				return
+			default:
+			}
+
+			var we walletEntry
+			if genMode == "mnemonic" {
+				w, err := mnemonic.Generate(cfg.Generator.MnemonicWords, 0)
+				if err != nil {
+					continue
+				}
+				we = walletEntry{address: w.Address, privateKey: w.PrivateKey, mnemonic: w.Mnemonic}
+			} else {
+				w, err := wallet.Generate()
+				if err != nil {
+					continue
+				}
+				we = walletEntry{address: w.Address, privateKey: w.PrivateKey}
+			}
+			stats.Generated.Add(1)
+			batch = append(batch, we)
+
+			if len(batch) >= batchSize {
+				select {
+				case pool.jobs <- batchJob{wallets: batch}:
+					batch = make([]walletEntry, 0, batchSize)
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	// ── Tunggu sinyal stop ──
+	<-sig
+	cancel()
+
+	cYellow.Printf("\n\n[STOP] Menghentikan... tunggu sebentar\n")
+	pool.close()
+
+	elapsed := time.Since(stats.startTime).Round(time.Millisecond)
+
+	// ── Simpan resume state ──
+	resume.Generated += stats.Generated.Load()
+	resume.Checked += stats.Checked.Load()
+	resume.Found += stats.Found.Load()
+	saveResume(cfg.Output.ResumeFile, resume)
+
+	// ── Ringkasan ──
+	fmt.Println()
+	cCyan.Println("════════════════════════════════════════════════════════")
+	cWhite.Printf("  ─── Sesi Ini ───\n")
+	cWhite.Printf("  Generated:   %d wallets (%.0f/s)\n", stats.Generated.Load(), stats.genRate())
+	cWhite.Printf("  Checked:     %d wallets (%.0f/s)\n", stats.Checked.Load(), stats.checkRate())
+	cGreen.Printf("  Found:       %d wallets\n", stats.Found.Load())
+	cRed.Printf("  Errors:      %d\n", stats.Errors.Load())
+	cYellow.Printf("  Duration:    %s\n", elapsed)
+	fmt.Println()
+	cWhite.Printf("  ─── Total Semua Sesi (%d sesi) ───\n", resume.Sessions)
+	cWhite.Printf("  Generated:   %d\n", resume.Generated)
+	cWhite.Printf("  Checked:     %d\n", resume.Checked)
+	cGreen.Printf("  Found:       %d\n", resume.Found)
+	cCyan.Println("════════════════════════════════════════════════════════")
+
+	if stats.Found.Load() > 0 {
+		cGreen.Printf("\n📁 Hasil di: %s\n", absOut)
+	}
+	if cfg.Output.StatsLog != "" {
+		cDim.Printf("📊 Stats CSV: %s\n", cfg.Output.StatsLog)
+	}
+	fmt.Println()
+
+	if useProxy && pm.Count() > 0 {
+		pm.Save()
+		cGreen.Printf("[PROXY] %d proxy aktif disimpan ke %s\n\n", pm.Count(), pFile)
+	}
 }

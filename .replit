@@ -24,12 +24,12 @@ args = "ETH Wallet Tool"
 name = "ETH Wallet Tool"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "cd eth-wallet-tool && ./bin/eth-generator -n 5 && echo '---' && ./bin/eth-checker --help 2>&1 | head -5"
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd eth-wallet-tool && echo '=== ETH Generator ===' && ./bin/eth-generator -n 3 && echo '' && echo '=== ETH Checker (Vitalik) ===' && ./bin/eth-checker -addr 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 2>&1 | tail -5"
 
 [agent]
 stack = "PNPM_WORKSPACE"
