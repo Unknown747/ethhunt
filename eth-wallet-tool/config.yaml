@@ -54,6 +54,7 @@ telegram:
 generator:
   mode: random
   mnemonic_words: 12
+  mnemonic_paths: 5   # Jumlah address per seed (mode mnemonic): path index 0,1,2...N-1
 
 # ── Token ERC-20 ─────────────────────────────────────
 # Aktifkan untuk cek saldo USDT/USDC selain ETH native

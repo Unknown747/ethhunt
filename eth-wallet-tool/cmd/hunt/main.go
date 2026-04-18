@@ -41,7 +41,7 @@ var (
 func printBanner() {
 	cCyan.Print(`
 ╔════════════════════════════════════════════════════════╗
-║           ETH WALLET HUNTER  v4.1                      ║
+║           ETH WALLET HUNTER  v4.2                      ║
 ║        Auto Generate + Check | Ethereum Mainnet        ║
 ╚════════════════════════════════════════════════════════╝
 `)
@@ -100,21 +100,21 @@ func newStatsLogger(path string) *statsLogger {
 	}
 	sl := &statsLogger{file: f, buf: bufio.NewWriter(f)}
 	if needHeader {
-		fmt.Fprintln(sl.buf, "timestamp,generated,checked,found,errors,gen_rate,check_rate,rpc_alive")
+		fmt.Fprintln(sl.buf, "timestamp,generated,checked,found,errors,gen_rate,check_rate,rpc_alive,batch_size")
 		sl.buf.Flush()
 	}
 	return sl
 }
 
-func (sl *statsLogger) write(generated, checked, found, errors int64, genRate, checkRate float64, rpcAlive int) {
+func (sl *statsLogger) write(generated, checked, found, errors int64, genRate, checkRate float64, rpcAlive, batchSize int) {
 	if sl == nil {
 		return
 	}
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
-	fmt.Fprintf(sl.buf, "%s,%d,%d,%d,%d,%.2f,%.2f,%d\n",
+	fmt.Fprintf(sl.buf, "%s,%d,%d,%d,%d,%.2f,%.2f,%d,%d\n",
 		time.Now().Format(time.RFC3339),
-		generated, checked, found, errors, genRate, checkRate, rpcAlive)
+		generated, checked, found, errors, genRate, checkRate, rpcAlive, batchSize)
 	sl.buf.Flush()
 }
 
@@ -295,6 +295,37 @@ func (wp *workerPool) close() {
 	close(wp.results)
 }
 
+// ─── Batch Size Auto-Scaler ───────────────────────────────────────────────────
+
+const (
+	batchScaleMin = 5
+	batchScaleMax = 200
+)
+
+// scaleBatch menyesuaikan batch size berdasarkan error rate per interval.
+// Error rate < 20% → naik pelan-pelan; > 60% → turun lebih cepat.
+func scaleBatch(cur int64, deltaChk, deltaErr int64) int64 {
+	if deltaChk < 10 {
+		return cur // sample terlalu sedikit, skip
+	}
+	errRate := float64(deltaErr) / float64(deltaChk)
+	switch {
+	case errRate < 0.20 && cur < batchScaleMax:
+		cur += 2 // naik perlahan saat RPC sehat
+	case errRate > 0.60 && cur > batchScaleMin:
+		cur -= 5 // turun lebih cepat saat banyak error
+	case errRate > 0.40 && cur > batchScaleMin:
+		cur -= 2
+	}
+	if cur < batchScaleMin {
+		cur = batchScaleMin
+	}
+	if cur > batchScaleMax {
+		cur = batchScaleMax
+	}
+	return cur
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 func main() {
@@ -330,6 +361,7 @@ func main() {
 	if *statsInterval > 0 {
 		statInterval = *statsInterval
 	}
+	mnemonicPaths := cfg.Generator.MnemonicPaths
 
 	nWorkers := *workers
 	if nWorkers <= 0 {
@@ -453,9 +485,14 @@ func main() {
 	// ── Print config ──
 	if !*silent {
 		cYellow.Printf("[CONFIG] Network:    Ethereum Mainnet (ETH)\n")
-		cYellow.Printf("[CONFIG] Mode:       %s\n", strings.ToUpper(genMode))
-		cYellow.Printf("[CONFIG] Workers:    %d | Batch: %d\n", nWorkers, cfg.RPC.BatchSize)
-		cYellow.Printf("[CONFIG] RPC Nodes:  %d/%d aktif\n", aliveCount, len(specs))
+		cYellow.Printf("[CONFIG] Mode:       %s", strings.ToUpper(genMode))
+		if genMode == "mnemonic" {
+			cYellow.Printf("  (seed → %d address per mnemonic)", mnemonicPaths)
+		}
+		fmt.Println()
+		cYellow.Printf("[CONFIG] Workers:    %d | Batch: %d (auto-scale %d–%d)\n",
+			nWorkers, cfg.RPC.BatchSize, batchScaleMin, batchScaleMax)
+		cYellow.Printf("[CONFIG] RPC Nodes:  %d/%d aktif (latency-priority routing)\n", aliveCount, len(specs))
 		if len(tokenChecks) > 0 {
 			names := make([]string, len(tokenChecks))
 			for i, t := range tokenChecks {
@@ -485,8 +522,13 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
-	// ── Stats printer + Watchdog error rate + Periodic RPC re-check ──
+	// ── Auto-scale batch size (atomic, dibaca oleh generator goroutine) ──
+	curBatchSize := atomic.Int64{}
+	curBatchSize.Store(int64(cfg.RPC.BatchSize))
+
+	// ── Stats printer + Watchdog + Periodic RPC re-check + Telegram alert ──
 	var prevChecked, prevErrors int64
+	rpcWasAlive := aliveCount > 0
 	recheckTicker := time.NewTicker(5 * time.Minute)
 	defer recheckTicker.Stop()
 
@@ -499,43 +541,69 @@ func main() {
 				return
 
 			case <-statsTicker.C:
-				curChecked := stats.Checked.Load()
-				curErrors := stats.Errors.Load()
-				deltaChk := curChecked - prevChecked
-				deltaErr := curErrors - prevErrors
-				prevChecked = curChecked
-				prevErrors = curErrors
+				curChk := stats.Checked.Load()
+				curErr := stats.Errors.Load()
+				deltaChk := curChk - prevChecked
+				deltaErr := curErr - prevErrors
+				prevChecked = curChk
+				prevErrors = curErr
+				bsz := int(curBatchSize.Load())
 
 				if !*silent {
 					elapsed := time.Since(stats.startTime).Round(time.Second)
-					cDim.Printf("\r[%s] Gen: %d (%.0f/s) | Chk: %d (%.0f/s) | Found: %d | Err: %d | RPC: %d/%d   ",
+					cDim.Printf("\r[%s] Gen: %d (%.0f/s) | Chk: %d (%.0f/s) | Found: %d | Err: %d | RPC: %d/%d | Batch: %d   ",
 						elapsed,
 						stats.Generated.Load(), stats.genRate(),
 						stats.Checked.Load(), stats.checkRate(),
 						stats.Found.Load(),
 						stats.Errors.Load(),
-						rpcMgr.AliveCount(), rpcMgr.TotalCount(),
+						rpcMgr.AliveCount(), rpcMgr.TotalCount(), bsz,
 					)
 				}
 				sl.write(stats.Generated.Load(), stats.Checked.Load(),
 					stats.Found.Load(), stats.Errors.Load(),
-					stats.genRate(), stats.checkRate(), rpcMgr.AliveCount())
+					stats.genRate(), stats.checkRate(), rpcMgr.AliveCount(), bsz)
 
-				// ── Watchdog: error rate > 70% → re-check RPC ──
+				// ── [FITUR 4] Auto-scale batch size ──
+				newBsz := scaleBatch(int64(bsz), deltaChk, deltaErr)
+				if newBsz != int64(bsz) {
+					curBatchSize.Store(newBsz)
+					if !*silent {
+						fmt.Println()
+						if newBsz > int64(bsz) {
+							cGreen.Printf("[BATCH] RPC sehat → batch naik: %d → %d\n", bsz, newBsz)
+						} else {
+							cYellow.Printf("[BATCH] Error tinggi → batch turun: %d → %d\n", bsz, newBsz)
+						}
+					}
+				}
+
+				// ── [FITUR 3] Watchdog: error rate > 70% → re-check RPC ──
 				if deltaChk > 0 && float64(deltaErr)/float64(deltaChk) > 0.7 {
 					if !*silent {
 						fmt.Println()
-						cRed.Printf("[WATCHDOG] Error rate tinggi (%.0f%%), memeriksa ulang RPC...\n",
+						cRed.Printf("[WATCHDOG] Error rate %.0f%% → memeriksa ulang RPC...\n",
 							float64(deltaErr)/float64(deltaChk)*100)
 					}
 					revived, total := rpcMgr.ReCheckDead(5 * time.Second)
 					if !*silent && total > 0 {
-						cYellow.Printf("[WATCHDOG] %d/%d endpoint mati berhasil dihidupkan kembali\n", revived, total)
+						cYellow.Printf("[WATCHDOG] %d/%d endpoint mati kembali aktif\n", revived, total)
 					}
 				}
 
+				// ── [FITUR 3] Telegram alert: semua RPC mati / pulih ──
+				aliveNow := rpcMgr.AliveCount() > 0
+				if !aliveNow && rpcWasAlive {
+					rpcWasAlive = false
+					tg.Notify("⚠️ ETH Hunt: SEMUA RPC endpoint mati! Tool berjalan tanpa koneksi aktif.")
+				} else if aliveNow && !rpcWasAlive {
+					rpcWasAlive = true
+					tg.Notify(fmt.Sprintf("✅ ETH Hunt: RPC kembali normal. %d/%d endpoint aktif.",
+						rpcMgr.AliveCount(), rpcMgr.TotalCount()))
+				}
+
 			case <-recheckTicker.C:
-				// ── Periodic re-check tiap 5 menit ──
+				// ── [FITUR 1] Periodic re-check tiap 5 menit ──
 				revived, total := rpcMgr.ReCheckDead(5 * time.Second)
 				if !*silent && total > 0 {
 					fmt.Println()
@@ -590,9 +658,9 @@ func main() {
 	}()
 
 	// ── Generator goroutine ──
-	batchSize := cfg.RPC.BatchSize
+	// [FITUR 1] Multi-derivation path: mode mnemonic → 1 seed menghasilkan N address
 	go func() {
-		batch := make([]walletEntry, 0, batchSize)
+		batch := make([]walletEntry, 0, int(curBatchSize.Load()))
 		for {
 			select {
 			case <-ctx.Done():
@@ -600,29 +668,55 @@ func main() {
 			default:
 			}
 
-			var we walletEntry
+			bsz := int(curBatchSize.Load())
+
 			if genMode == "mnemonic" {
-				w, err := mnemonic.Generate(cfg.Generator.MnemonicWords, 0)
+				// Hasilkan 1 seed, derive mnemonicPaths address dari seed itu
+				baseWallet, err := mnemonic.Generate(cfg.Generator.MnemonicWords, 0)
 				if err != nil {
 					continue
 				}
-				we = walletEntry{address: w.Address, privateKey: w.PrivateKey, mnemonic: w.Mnemonic}
+				for idx := uint32(0); idx < uint32(mnemonicPaths); idx++ {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+					w, err := mnemonic.FromMnemonic(baseWallet.Mnemonic, idx)
+					if err != nil {
+						continue
+					}
+					stats.Generated.Add(1)
+					batch = append(batch, walletEntry{
+						address:    w.Address,
+						privateKey: w.PrivateKey,
+						mnemonic:   w.Mnemonic,
+					})
+
+					if len(batch) >= bsz {
+						select {
+						case pool.jobs <- batchJob{wallets: batch}:
+							batch = make([]walletEntry, 0, bsz)
+						case <-ctx.Done():
+							return
+						}
+					}
+				}
 			} else {
 				w, err := wallet.Generate()
 				if err != nil {
 					continue
 				}
-				we = walletEntry{address: w.Address, privateKey: w.PrivateKey}
-			}
-			stats.Generated.Add(1)
-			batch = append(batch, we)
+				stats.Generated.Add(1)
+				batch = append(batch, walletEntry{address: w.Address, privateKey: w.PrivateKey})
 
-			if len(batch) >= batchSize {
-				select {
-				case pool.jobs <- batchJob{wallets: batch}:
-					batch = make([]walletEntry, 0, batchSize)
-				case <-ctx.Done():
-					return
+				if len(batch) >= bsz {
+					select {
+					case pool.jobs <- batchJob{wallets: batch}:
+						batch = make([]walletEntry, 0, bsz)
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}

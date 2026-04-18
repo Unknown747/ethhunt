@@ -1,5 +1,5 @@
 // Package rpc menyediakan RPC manager dengan batch call, dead endpoint detection,
-// rate limiting per endpoint, dan ERC-20 token balance checking.
+// latency-priority routing, rate limiting, dan ERC-20 token balance checking.
 package rpc
 
 import (
@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -74,18 +75,19 @@ func (tb *tokenBucket) Wait(ctx context.Context) error {
 // Berguna untuk endpoint berbayar (Infura, Alchemy, QuickNode) yang butuh auth header.
 type EndpointSpec struct {
 	URL     string
-	Headers map[string]string // opsional: custom HTTP headers (misal Authorization)
+	Headers map[string]string // opsional: custom HTTP headers
 }
 
 // ── Endpoint ──────────────────────────────────────────────────────────────────
 
 type Endpoint struct {
-	URL       string
-	headers   map[string]string
-	mu        sync.Mutex
-	fails     int
-	deadUntil time.Time
-	limiter   *tokenBucket
+	URL        string
+	headers    map[string]string
+	mu         sync.Mutex
+	fails      int
+	deadUntil  time.Time
+	avgLatency time.Duration // EWMA latency — dipakai untuk prioritas routing
+	limiter    *tokenBucket
 }
 
 func (e *Endpoint) IsAlive() bool {
@@ -109,6 +111,25 @@ func (e *Endpoint) MarkSuccess() {
 	e.fails = 0
 	e.deadUntil = time.Time{}
 	e.mu.Unlock()
+}
+
+// updateLatency memperbarui rata-rata latency dengan EWMA (α=0.3)
+func (e *Endpoint) updateLatency(sample time.Duration) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.avgLatency == 0 {
+		e.avgLatency = sample
+	} else {
+		const alpha = 0.3
+		e.avgLatency = time.Duration(float64(e.avgLatency)*(1-alpha) + float64(sample)*alpha)
+	}
+}
+
+// AvgLatency mengembalikan rata-rata latency endpoint
+func (e *Endpoint) AvgLatency() time.Duration {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.avgLatency
 }
 
 // ── Manager ───────────────────────────────────────────────────────────────────
@@ -145,20 +166,43 @@ func NewManager(specs []EndpointSpec, client *http.Client, timeout time.Duration
 	}
 }
 
+// next memilih endpoint berikutnya berdasarkan latency (tercepat diprioritaskan).
+// Jitter ditambahkan agar beban tersebar dan tidak hammering satu endpoint.
 func (m *Manager) next() *Endpoint {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	n := int64(len(m.endpoints))
-	if n == 0 {
+
+	if len(m.endpoints) == 0 {
 		return nil
 	}
-	for i := int64(0); i < n; i++ {
-		ep := m.endpoints[(m.rpcIdx.Add(1)-1)%n]
-		if ep.IsAlive() {
-			return ep
+
+	var best *Endpoint
+	var bestScore float64
+
+	for _, ep := range m.endpoints {
+		if !ep.IsAlive() {
+			continue
+		}
+		lat := ep.AvgLatency().Milliseconds()
+		if lat <= 0 {
+			lat = 1
+		}
+		// Jitter 0.7–1.3 → distribusi beban, tetap memprioritaskan endpoint cepat
+		jitter := 0.7 + rand.Float64()*0.6
+		score := float64(lat) * jitter
+		if best == nil || score < bestScore {
+			best = ep
+			bestScore = score
 		}
 	}
-	return m.endpoints[m.rpcIdx.Load()%n]
+
+	if best != nil {
+		return best
+	}
+
+	// Semua mati → fallback round-robin biasa
+	n := int64(len(m.endpoints))
+	return m.endpoints[(m.rpcIdx.Add(1)-1)%n]
 }
 
 // AliveCount mengembalikan jumlah endpoint yang aktif
@@ -179,6 +223,29 @@ func (m *Manager) TotalCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.endpoints)
+}
+
+// EndpointLatencies mengembalikan URL dan latency setiap endpoint (untuk display)
+func (m *Manager) EndpointLatencies() []struct {
+	URL     string
+	Latency time.Duration
+	Alive   bool
+} {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]struct {
+		URL     string
+		Latency time.Duration
+		Alive   bool
+	}, len(m.endpoints))
+	for i, ep := range m.endpoints {
+		out[i] = struct {
+			URL     string
+			Latency time.Duration
+			Alive   bool
+		}{ep.URL, ep.AvgLatency(), ep.IsAlive()}
+	}
+	return out
 }
 
 // ── JSON-RPC types ────────────────────────────────────────────────────────────
@@ -279,7 +346,9 @@ func (m *Manager) GetBalanceBatch(ctx context.Context, addresses []string, token
 		}
 
 		reqCtx, cancel := context.WithTimeout(ctx, m.timeout)
+		start := time.Now()
 		err := m.doBatch(reqCtx, ep, body, idMap, results)
+		latency := time.Since(start)
 		cancel()
 
 		if err != nil {
@@ -289,6 +358,7 @@ func (m *Manager) GetBalanceBatch(ctx context.Context, addresses []string, token
 		}
 
 		ep.MarkSuccess()
+		ep.updateLatency(latency)
 		return results, nil
 	}
 
@@ -384,8 +454,7 @@ type EndpointStatus struct {
 	Latency time.Duration
 }
 
-// HealthCheck menguji semua endpoint secara concurrent.
-// Endpoint yang tidak merespons dalam timeout akan ditandai mati.
+// HealthCheck menguji semua endpoint secara concurrent dan menyimpan latency.
 func (m *Manager) HealthCheck(timeout time.Duration) []EndpointStatus {
 	m.mu.RLock()
 	eps := make([]*Endpoint, len(m.endpoints))
@@ -404,11 +473,16 @@ func (m *Manager) HealthCheck(timeout time.Duration) []EndpointStatus {
 			latency := time.Since(start)
 			results[idx] = EndpointStatus{URL: e.URL, Alive: alive, Latency: latency}
 
-			if !alive {
-				e.mu.Lock()
+			e.mu.Lock()
+			if alive {
+				// Simpan latency awal dari health check
+				if e.avgLatency == 0 {
+					e.avgLatency = latency
+				}
+			} else {
 				e.deadUntil = time.Now().Add(m.deadCooldown)
-				e.mu.Unlock()
 			}
+			e.mu.Unlock()
 		}(i, ep)
 	}
 
@@ -436,10 +510,15 @@ func (m *Manager) ReCheckDead(timeout time.Duration) (revived, total int) {
 		wg.Add(1)
 		go func(e *Endpoint) {
 			defer wg.Done()
+			start := time.Now()
 			if m.pingEndpoint(e.URL, e.headers, timeout) {
+				latency := time.Since(start)
 				e.mu.Lock()
 				e.deadUntil = time.Time{}
 				e.fails = 0
+				if e.avgLatency == 0 {
+					e.avgLatency = latency
+				}
 				e.mu.Unlock()
 				mu.Lock()
 				revived++
