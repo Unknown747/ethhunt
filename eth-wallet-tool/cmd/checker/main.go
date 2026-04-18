@@ -113,18 +113,24 @@ func main() {
                 cfg = config.Default()
         }
 
-        // ── RPC Endpoints ──
-        endpoints := cfg.RPC.Endpoints
+        // ── Build endpoint specs (gabung URL biasa + auth endpoints) ──
+        var specs []rpc.EndpointSpec
         if *rpcURLs != "" {
-                endpoints = nil
                 for _, u := range strings.Split(*rpcURLs, ",") {
                         u = strings.TrimSpace(u)
                         if u != "" {
-                                endpoints = append(endpoints, u)
+                                specs = append(specs, rpc.EndpointSpec{URL: u})
                         }
                 }
+        } else {
+                for _, u := range cfg.RPC.Endpoints {
+                        specs = append(specs, rpc.EndpointSpec{URL: u})
+                }
+                for _, ae := range cfg.RPC.EndpointsAuth {
+                        specs = append(specs, rpc.EndpointSpec{URL: ae.URL, Headers: ae.Headers})
+                }
         }
-        if len(endpoints) == 0 {
+        if len(specs) == 0 {
                 boldRed.Println("[ERROR] Tidak ada RPC endpoint dikonfigurasi")
                 os.Exit(1)
         }
@@ -178,13 +184,13 @@ func main() {
                         IdleConnTimeout:     60 * time.Second,
                 },
         }
-        rpcMgr := rpc.NewManager(endpoints, httpClient,
+        rpcMgr := rpc.NewManager(specs, httpClient,
                 cfg.RPC.Timeout, cfg.RPC.Retries,
                 cfg.RPC.DeadThreshold, cfg.RPC.DeadCooldown,
                 cfg.RPC.RateLimit)
 
         // ── RPC Health Check ──
-        boldYellow.Printf("\n[RPC] Mengecek %d endpoint...\n", len(endpoints))
+        boldYellow.Printf("\n[RPC] Mengecek %d endpoint...\n", len(specs))
         hcResults := rpcMgr.HealthCheck(5 * time.Second)
         aliveCount := 0
         for _, s := range hcResults {
@@ -196,10 +202,10 @@ func main() {
                 }
         }
         if aliveCount == 0 {
-                boldRed.Println("\n[ERROR] Semua RPC endpoint tidak merespons. Periksa koneksi internet atau tambah endpoint baru di config.yaml")
+                boldRed.Println("\n[ERROR] Semua RPC endpoint tidak merespons. Periksa koneksi atau tambah endpoint baru di config.yaml")
                 os.Exit(1)
         }
-        boldYellow.Printf("[RPC] %d/%d endpoint aktif\n", aliveCount, len(endpoints))
+        boldYellow.Printf("[RPC] %d/%d endpoint aktif\n", aliveCount, len(specs))
 
         // ── Config display ──
         boldYellow.Printf("\n[CONFIG] Network:    Ethereum Mainnet (ETH)\n")
