@@ -1,6 +1,6 @@
 # ETH Wallet Tool
 
-Proyek CLI berbasis **Go 1.25.5** untuk generate, cek balance, dan hunting wallet Ethereum secara massal dan cepat. Mendukung multi-chain, batch RPC, proxy otomatis, notifikasi Telegram, BIP39 mnemonic, dan token ERC-20.
+Proyek CLI berbasis **Go 1.25.5** untuk generate, cek balance, dan hunting wallet Ethereum secara massal dan cepat. Fokus pada **Ethereum Mainnet** dengan multi-RPC failover, batch RPC, notifikasi Telegram, BIP39 mnemonic, dan token ERC-20.
 
 ## Struktur Proyek
 
@@ -22,10 +22,9 @@ Proyek CLI berbasis **Go 1.25.5** untuk generate, cek balance, dan hunting walle
     │   └── hunt/main.go
     ├── internal/
     │   ├── config/config.go     # YAML config loader
-    │   ├── rpc/manager.go       # Batch RPC + dead endpoint detection
+    │   ├── rpc/manager.go       # Batch RPC + dead endpoint detection + rate limiter
     │   ├── notify/telegram.go   # Notifikasi Telegram
     │   ├── mnemonic/mnemonic.go # BIP39/BIP44 derivation
-    │   ├── proxy/proxy.go       # Proxy manager (fetch, validasi, round-robin)
     │   └── wallet/wallet.go     # Random wallet generator (ECDSA)
     ├── config.yaml         # ← Edit ini untuk konfigurasi
     ├── go.mod              # Go 1.25.5 + toolchain go1.25.5

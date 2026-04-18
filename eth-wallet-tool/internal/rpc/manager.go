@@ -17,8 +17,6 @@ import (
 )
 
 // ── Token Bucket Rate Limiter ─────────────────────────────────────────────────
-// Implementasi sederhana tanpa dependensi eksternal.
-// nil bucket = unlimited (tidak ada pembatasan).
 
 type tokenBucket struct {
 	mu       sync.Mutex
@@ -77,7 +75,7 @@ type Endpoint struct {
 	mu        sync.Mutex
 	fails     int
 	deadUntil time.Time
-	limiter   *tokenBucket // rate limiter per endpoint (nil = unlimited)
+	limiter   *tokenBucket
 }
 
 func (e *Endpoint) IsAlive() bool {
@@ -143,14 +141,12 @@ func (m *Manager) next() *Endpoint {
 	if n == 0 {
 		return nil
 	}
-	// Coba endpoint yang hidup dulu
 	for i := int64(0); i < n; i++ {
 		ep := m.endpoints[(m.rpcIdx.Add(1)-1)%n]
 		if ep.IsAlive() {
 			return ep
 		}
 	}
-	// Semua mati — kembalikan yang pertama tetap
 	return m.endpoints[m.rpcIdx.Load()%n]
 }
 
@@ -199,24 +195,16 @@ type TokenCheck struct {
 // AddressResult menyimpan semua hasil untuk satu wallet address
 type AddressResult struct {
 	ETH    *big.Int
-	Tokens map[string]*big.Int // token name → raw wei/unit amount
+	Tokens map[string]*big.Int
 }
 
 // GetBalanceBatch mengirim banyak eth_getBalance dalam satu HTTP call.
 // Juga menyertakan token ERC-20 jika tokens tidak kosong.
 func (m *Manager) GetBalanceBatch(ctx context.Context, addresses []string, tokens []TokenCheck) (map[string]*AddressResult, error) {
-	return m.GetBalanceBatchWithClient(ctx, nil, addresses, tokens)
-}
-
-// GetBalanceBatchWithClient sama dengan GetBalanceBatch tetapi menggunakan
-// client kustom (misalnya HTTP client dengan proxy). Jika client nil, pakai
-// client default manager. Ini memungkinkan setiap worker menggunakan proxy berbeda.
-func (m *Manager) GetBalanceBatchWithClient(ctx context.Context, client *http.Client, addresses []string, tokens []TokenCheck) (map[string]*AddressResult, error) {
 	if len(addresses) == 0 {
 		return map[string]*AddressResult{}, nil
 	}
 
-	// Bangun batch request
 	reqs := make([]rpcReq, 0, len(addresses)*(1+len(tokens)))
 	id := 1
 	idMap := make(map[int]struct{ addr, typ, tokenName string })
@@ -230,7 +218,6 @@ func (m *Manager) GetBalanceBatchWithClient(ctx context.Context, client *http.Cl
 		id++
 
 		for _, tok := range tokens {
-			// balanceOf(address) = 0x70a08231 + padded address
 			data := "0x70a08231" + fmt.Sprintf("%064s", strings.TrimPrefix(addr, "0x"))
 			idMap[id] = struct{ addr, typ, tokenName string }{addr, "token", tok.Name}
 			reqs = append(reqs, rpcReq{
@@ -247,19 +234,12 @@ func (m *Manager) GetBalanceBatchWithClient(ctx context.Context, client *http.Cl
 		return nil, err
 	}
 
-	// Inisialisasi hasil
 	results := make(map[string]*AddressResult, len(addresses))
 	for _, addr := range addresses {
 		results[addr] = &AddressResult{
 			ETH:    big.NewInt(0),
 			Tokens: make(map[string]*big.Int),
 		}
-	}
-
-	// Gunakan client kustom (proxy) jika disediakan, fallback ke default
-	activeClient := m.client
-	if client != nil {
-		activeClient = client
 	}
 
 	var lastErr error
@@ -277,13 +257,12 @@ func (m *Manager) GetBalanceBatchWithClient(ctx context.Context, client *http.Cl
 			return nil, fmt.Errorf("tidak ada RPC endpoint")
 		}
 
-		// Rate limiting per endpoint (skip jika unlimited)
 		if err := ep.limiter.Wait(ctx); err != nil {
 			return nil, err
 		}
 
 		reqCtx, cancel := context.WithTimeout(ctx, m.timeout)
-		err := m.doBatch(reqCtx, ep, activeClient, body, idMap, results)
+		err := m.doBatch(reqCtx, ep, body, idMap, results)
 		cancel()
 
 		if err != nil {
@@ -302,7 +281,6 @@ func (m *Manager) GetBalanceBatchWithClient(ctx context.Context, client *http.Cl
 func (m *Manager) doBatch(
 	ctx context.Context,
 	ep *Endpoint,
-	client *http.Client,
 	body []byte,
 	idMap map[int]struct{ addr, typ, tokenName string },
 	out map[string]*AddressResult,
@@ -313,7 +291,7 @@ func (m *Manager) doBatch(
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := client.Do(req)
+	resp, err := m.client.Do(req)
 	if err != nil {
 		return err
 	}

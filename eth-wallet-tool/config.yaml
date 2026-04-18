@@ -3,8 +3,24 @@
 #  Edit file ini, lalu jalankan tool (tidak perlu rebuild)
 # ═══════════════════════════════════════════════════
 
-# Chain yang digunakan: ethereum | bsc | polygon | arbitrum
-chain: ethereum
+# ── RPC Endpoints (Ethereum Mainnet) ────────────────
+# Tambah atau hapus endpoint sesuai kebutuhan
+# Tool akan otomatis failover ke endpoint berikutnya
+rpc:
+  endpoints:
+    - https://eth.llamarpc.com
+    - https://ethereum.publicnode.com
+    - https://eth-mainnet.public.blastapi.io
+    - https://rpc.payload.de
+    - https://1rpc.io/eth
+    - https://rpc.ankr.com/eth
+    - https://cloudflare-eth.com
+  batch_size: 20      # Alamat per batch call (makin besar = makin cepat)
+  timeout: 12s
+  retries: 3
+  dead_threshold: 5   # Berapa gagal sebelum RPC diistirahatkan
+  dead_cooldown: 5m   # Lama istirahat RPC
+  rate_limit: 0       # Maks request/detik per RPC endpoint (0 = unlimited)
 
 # ── Worker ──────────────────────────────────────────
 workers:
@@ -12,31 +28,14 @@ workers:
   checker: 0    # 0 = otomatis (3 × jumlah CPU)
   generator: 0  # 0 = otomatis (jumlah CPU)
 
-# ── RPC ─────────────────────────────────────────────
-rpc:
-  batch_size: 20      # Alamat per batch call (makin besar = makin cepat)
-  timeout: 12s
-  retries: 3
-  dead_threshold: 5   # Berapa gagal sebelum RPC diistirahatkan
-  dead_cooldown: 5m   # Lama istirahat RPC
-  rate_limit: 0       # Maks request/detik per RPC endpoint (0 = unlimited, tanpa throttling)
-
-# ── Proxy ────────────────────────────────────────────
-proxy:
-  enabled: true
-  file: proxies.txt
-  max_fails: 3
-  auto_fetch: false
-  validate_workers: 50
-
 # ── Notifikasi Telegram ──────────────────────────────
 # 1. Buat bot di @BotFather → salin token
 # 2. Kirim pesan ke bot, lalu cek chat_id via:
 #    https://api.telegram.org/bot<TOKEN>/getUpdates
 telegram:
   enabled: false
-  token: ""      # Contoh: 7123456789:AAHdq...
-  chat_id: ""    # Contoh: 123456789 atau -100123456789 (group)
+  token: ""
+  chat_id: ""
 
 # ── Mode Generator ───────────────────────────────────
 # random   : private key acak (default, tercepat)
@@ -47,7 +46,6 @@ generator:
 
 # ── Token ERC-20 ─────────────────────────────────────
 # Aktifkan untuk cek saldo USDT/USDC selain ETH native
-# Catatan: hanya berlaku untuk chain Ethereum
 tokens:
   check_erc20: false
   list:
@@ -60,48 +58,10 @@ tokens:
 
 # ── Output ───────────────────────────────────────────
 output:
-  found_file: found.txt       # File hasil wallet yang punya balance
-  stats_log: stats.csv        # Log statistik (kosongkan untuk nonaktifkan)
-  resume_file: .hunt_resume   # File state resume sesi hunt
+  found_file: found.txt
+  stats_log: stats.csv
+  resume_file: .hunt_resume
 
 # ── Hunt ─────────────────────────────────────────────
 hunt:
   stats_interval: 5s
-
-# ── Daftar Chain (bisa ditambah sendiri) ──────────────
-chains:
-  ethereum:
-    name: Ethereum Mainnet
-    currency: ETH
-    chain_id: 1
-    rpc:
-      - https://eth.llamarpc.com
-      - https://ethereum.publicnode.com
-      - https://eth-mainnet.public.blastapi.io
-      - https://rpc.payload.de
-      - https://1rpc.io/eth
-
-  bsc:
-    name: BNB Smart Chain
-    currency: BNB
-    chain_id: 56
-    rpc:
-      - https://bsc-dataseed1.binance.org
-      - https://bsc-dataseed2.binance.org
-      - https://bsc-dataseed3.binance.org
-
-  polygon:
-    name: Polygon
-    currency: MATIC
-    chain_id: 137
-    rpc:
-      - https://polygon-rpc.com
-      - https://rpc-mainnet.maticvigil.com
-
-  arbitrum:
-    name: Arbitrum One
-    currency: ETH
-    chain_id: 42161
-    rpc:
-      - https://arb1.arbitrum.io/rpc
-      - https://rpc.ankr.com/arbitrum
