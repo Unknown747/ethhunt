@@ -398,6 +398,24 @@ func main() {
                 cfg.RPC.DeadThreshold, cfg.RPC.DeadCooldown,
                 cfg.RPC.RateLimit)
 
+        // ── RPC Health Check ──
+        cYellow.Printf("[RPC] Mengecek %d endpoint...\n", len(endpoints))
+        hcResults := rpcMgr.HealthCheck(5 * time.Second)
+        aliveCount := 0
+        for _, s := range hcResults {
+                if s.Alive {
+                        aliveCount++
+                        cGreen.Printf("  ✓ %-50s  %s\n", s.URL, s.Latency.Round(time.Millisecond))
+                } else {
+                        cRed.Printf("  ✗ %-50s  TIMEOUT/ERROR\n", s.URL)
+                }
+        }
+        if aliveCount == 0 {
+                cRed.Println("\n[ERROR] Semua RPC endpoint tidak merespons. Periksa koneksi internet atau tambah endpoint baru di config.yaml")
+                os.Exit(1)
+        }
+        cYellow.Printf("[RPC] %d/%d endpoint aktif\n\n", aliveCount, len(endpoints))
+
         // ── Resume State ──
         resume := loadResume(cfg.Output.ResumeFile)
         resume.Sessions++
